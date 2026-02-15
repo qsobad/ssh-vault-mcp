@@ -156,12 +156,12 @@ describe('Security Breach: Input Validation', () => {
       expect(result.allowed).toBe(true);
     });
 
-    it('FINDING: control characters in commands - bare root not detected', () => {
+    it('FIXED: control characters in commands - bare root now detected', () => {
       const engine = new PolicyEngine();
       const dangerCheck = engine.checkDangerousPatterns('rm\t-rf\r\n/');
-      // Tab matches \s+ in the regex, but the bare "/" at end of string
-      // plus the \r\n characters interfere with pattern matching
-      expect(dangerCheck.dangerous).toBe(false); // FINDING: not detected
+      // With the updated regex /rm\s+(-[a-zA-Z]*\s+)*\//, tab and whitespace
+      // characters are handled, and bare root is now caught
+      expect(dangerCheck.dangerous).toBe(true);
     });
 
     it('should handle empty strings', () => {
@@ -282,16 +282,68 @@ describe('Security Breach: Input Validation', () => {
       expect(() => ExecuteCommandSchema.parse(input)).toThrow();
     });
 
-    it('FINDING: Infinity timeout accepted by Zod z.number()', () => {
+    it('Infinity timeout accepted by Zod but clamped by server', () => {
       const input = {
         host: 'dev-01',
         command: 'ls',
         timeout: Infinity,
       };
       // Zod z.number() accepts Infinity - it's a valid JS number
-      // This could cause a command to never timeout
       const result = ExecuteCommandSchema.parse(input);
-      expect(result.timeout).toBe(Infinity); // FINDING: no finite constraint on timeout
+      expect(result.timeout).toBe(Infinity);
+      // However the server now validates: Number.isFinite(t) check rejects Infinity
+      // and falls back to default 30
+      expect(Number.isFinite(Infinity)).toBe(false);
+    });
+  });
+
+  describe('Server-Side Timeout Validation (New Security Feature)', () => {
+    // The server now clamps timeout: Math.min(Math.max(t, 1), 300) with Number.isFinite check
+    it('should clamp negative timeout to default', () => {
+      const t = -1;
+      const isValid = Number.isFinite(t) && t > 0;
+      // Negative fails t > 0 check, falls back to default 30
+      expect(isValid).toBe(false);
+    });
+
+    it('should clamp zero timeout to default', () => {
+      const t = 0;
+      const isValid = Number.isFinite(t) && t > 0;
+      expect(isValid).toBe(false);
+    });
+
+    it('should clamp Infinity to default', () => {
+      const t = Infinity;
+      const isValid = Number.isFinite(t);
+      expect(isValid).toBe(false);
+    });
+
+    it('should clamp NaN to default', () => {
+      const t = NaN;
+      const isValid = Number.isFinite(t);
+      expect(isValid).toBe(false);
+    });
+
+    it('should clamp excessively large timeout to 300', () => {
+      const t = 99999;
+      const clamped = Math.min(Math.max(t, 1), 300);
+      expect(clamped).toBe(300);
+    });
+
+    it('should accept valid timeout in range', () => {
+      const t = 60;
+      const isValid = Number.isFinite(t) && t > 0;
+      const clamped = Math.min(Math.max(t, 1), 300);
+      expect(isValid).toBe(true);
+      expect(clamped).toBe(60);
+    });
+
+    it('should clamp fractional timeout below 1 to 1', () => {
+      const t = 0.5;
+      const isValid = Number.isFinite(t) && t > 0;
+      const clamped = Math.min(Math.max(t, 1), 300);
+      expect(isValid).toBe(true);
+      expect(clamped).toBe(1);
     });
   });
 

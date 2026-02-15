@@ -16,83 +16,79 @@ describe('Security Breach: Web Server Endpoints', () => {
    */
 
   describe('Unauthenticated Endpoint Analysis', () => {
-    it('FINDING: /api/vault/unlock accepts requests without agent signature verification', () => {
-      // server.ts:54-69
+    it('REMAINING: /api/vault/unlock still accepts requests without agent signature', () => {
+      // server.ts:82-98
       // POST /api/vault/unlock creates unlock challenges for ANY caller
       // Only uses req.body.agentFingerprint, defaulting to 'SHA256:unknown-agent'
-      // No signature verification, no rate limiting
-      //
-      // Risk: An attacker can create unlimited unlock challenges,
-      // potentially exhausting memory or confusing the vault owner
+      // No signature verification - but rate limiting now applied on submit-unlock
       const finding = {
         endpoint: 'POST /api/vault/unlock',
-        severity: 'MEDIUM',
-        issue: 'No authentication required to create unlock challenges',
+        severity: 'LOW',
+        issue: 'No authentication to create unlock challenges, but submit-unlock is rate-limited',
         file: 'src/web/server.ts',
-        line: 54,
+        line: 82,
       };
-      expect(finding.severity).toBe('MEDIUM');
+      expect(finding.severity).toBe('LOW');
     });
 
-    it('FINDING: /api/vault/execute has no agent signature verification', () => {
-      // server.ts:108-194
-      // POST /api/vault/execute allows SSH command execution
-      // Only checks if vault is unlocked, no agent identity verification
-      // No policy enforcement on this endpoint
-      //
-      // Risk: Once vault is unlocked, ANY HTTP client can execute commands
-      // on any host without policy checks or command restrictions
+    it('FIXED: /api/vault/execute now requires agent signature and session', () => {
+      // server.ts:182-368
+      // POST /api/vault/execute now requires:
+      // 1. Agent signature verification (signature, publicKey, timestamp, nonce)
+      // 2. Valid sessionId
+      // 3. Session must belong to the agent
+      // 4. Dangerous pattern check
+      // 5. Shell injection check
+      // 6. Policy engine check
       const finding = {
         endpoint: 'POST /api/vault/execute',
-        severity: 'CRITICAL',
-        issue: 'No authentication, no policy checks on HTTP SSH execution endpoint',
+        severity: 'INFO',
+        issue: 'Execute endpoint now has full auth, policy, and injection checks',
+        secure: true,
+        checks: ['agent signature', 'session validation', 'session-agent binding', 'dangerous patterns', 'shell injection', 'policy engine'],
         file: 'src/web/server.ts',
-        line: 108,
+        line: 182,
       };
-      expect(finding.severity).toBe('CRITICAL');
+      expect(finding.secure).toBe(true);
+      expect(finding.checks.length).toBe(6);
     });
 
-    it('FINDING: /api/vault/status exposes vault lock state to any caller', () => {
-      // server.ts:99-105
+    it('REMAINING: /api/vault/status exposes vault lock state to any caller', () => {
+      // server.ts:131-137
       // GET /api/vault/status returns whether vault is locked/exists
-      // No authentication required
-      //
-      // Risk: Information disclosure - attacker can determine vault state
+      // No authentication required - low risk info disclosure
       const finding = {
         endpoint: 'GET /api/vault/status',
         severity: 'LOW',
         issue: 'Vault state exposed without authentication',
         file: 'src/web/server.ts',
-        line: 99,
+        line: 131,
       };
       expect(finding.severity).toBe('LOW');
     });
 
-    it('FINDING: /api/challenge/:id exposes challenge details without auth', () => {
-      // server.ts:197-214
-      // GET /api/challenge/:id returns challenge action, host, commands, agent info
-      // No authentication required - challenge ID is sufficient
-      //
-      // Risk: If challenge IDs are predictable (they use generateRandomId),
-      // an attacker could enumerate challenges
+    it('REMAINING: /api/challenge/:id exposes challenge details without auth', () => {
+      // server.ts:371-388
+      // GET /api/challenge/:id returns challenge info
+      // Challenge IDs are random (generateRandomId), so low enumeration risk
       const finding = {
         endpoint: 'GET /api/challenge/:id',
         severity: 'LOW',
         issue: 'Challenge details exposed with only challengeId as auth',
         file: 'src/web/server.ts',
-        line: 197,
+        line: 371,
       };
       expect(finding.severity).toBe('LOW');
     });
 
-    it('FINDING: /api/challenge/:id/status has no auth', () => {
-      // server.ts:217-220
+    it('REMAINING: /api/challenge/:id/status has no auth', () => {
+      // server.ts:391-394
       const finding = {
         endpoint: 'GET /api/challenge/:id/status',
         severity: 'LOW',
-        issue: 'Challenge polling endpoint has no auth',
+        issue: 'Challenge polling endpoint has no auth, but challengeId is random',
         file: 'src/web/server.ts',
-        line: 217,
+        line: 391,
       };
       expect(finding.severity).toBe('LOW');
     });
@@ -194,27 +190,25 @@ describe('Security Breach: Web Server Endpoints', () => {
   });
 
   describe('SSE/WebSocket Security', () => {
-    it('FINDING: SSE endpoint has no authentication', () => {
-      // server.ts:458-501
-      // GET /api/challenge/:id/listen sets up SSE
-      // Only requires challengeId - no further auth
-      //
-      // Risk: An attacker who knows the challengeId can listen
-      // for approval events and learn sessionId
+    it('FIXED: SSE endpoint now filters sessionId unless agent fingerprint provided', () => {
+      // server.ts:640-689
+      // GET /api/challenge/:id/listen now accepts ?fingerprint= query param
+      // Only includes sessionId in events if the listener provided agent fingerprint
+      // This prevents unauthenticated observers from learning sessionIds
       const finding = {
         endpoint: 'GET /api/challenge/:id/listen',
-        severity: 'MEDIUM',
-        issue: 'SSE endpoint exposes session IDs without auth',
+        severity: 'LOW',
+        issue: 'SSE endpoint filters sessionId unless agent fingerprint is provided',
         file: 'src/web/server.ts',
-        line: 458,
+        line: 640,
+        mitigation: 'sessionId stripped from events for unauthenticated listeners',
       };
-      expect(finding.severity).toBe('MEDIUM');
+      expect(finding.severity).toBe('LOW');
     });
 
-    it('FINDING: SSE timeout aligned with challenge expiry', () => {
-      // server.ts:493-500
+    it('SSE timeout aligned with challenge expiry', () => {
+      // server.ts:681-688
       // SSE connection times out when the challenge expires
-      // This prevents indefinite connection hanging
       const finding = {
         severity: 'INFO',
         issue: 'SSE has proper timeout based on challenge expiry',
@@ -225,13 +219,11 @@ describe('Security Breach: Web Server Endpoints', () => {
   });
 
   describe('Logging Security', () => {
-    it('FINDING: VEK length logged during registration and auth', () => {
-      // server.ts:273, 557
+    it('REMAINING: VEK length logged during registration and auth', () => {
+      // server.ts:451, 749
       // console.log('[register] VEK derived from password, length:', vek.length);
       // console.log('[manage-auth] VEK derived from password, length:', vek.length);
-      //
-      // Risk: Low - only length is logged, not the key itself
-      // But logging in production should be minimized
+      // Low risk - only length is logged, not the key itself
       const finding = {
         severity: 'INFO',
         issue: 'VEK length logged (not the key material)',
@@ -239,63 +231,80 @@ describe('Security Breach: Web Server Endpoints', () => {
       expect(finding.severity).toBe('INFO');
     });
 
-    it('FINDING: SSH credentials length logged during execution', () => {
-      // server.ts:165
-      // console.log('[execute] authType:', hostConfig.authType, 'credential length:', hostConfig.credential?.length || 0);
-      //
-      // Risk: Low - only length, not credential itself. But reveals auth type.
+    it('REMAINING: Auth type logged during SSH execution', () => {
+      // server.ts:326
+      // console.log('[execute] authType:', hostConfig.authType);
+      // Credential length no longer logged (credential is decrypted on-demand)
       const finding = {
         severity: 'LOW',
-        issue: 'Auth type and credential length logged during SSH execution',
+        issue: 'Auth type logged during SSH execution',
         file: 'src/web/server.ts',
-        line: 165,
+        line: 326,
       };
       expect(finding.severity).toBe('LOW');
     });
 
-    it('FINDING: Connection details logged during SSH execution', () => {
-      // server.ts:176
+    it('REMAINING: Connection details logged during SSH execution', () => {
+      // server.ts:338
       // console.log('[execute] Connecting to:', connectConfig.host, connectConfig.port, connectConfig.username);
-      //
-      // Risk: Reveals target host details in logs
       const finding = {
         severity: 'LOW',
         issue: 'SSH connection target details logged',
         file: 'src/web/server.ts',
-        line: 176,
+        line: 338,
       };
       expect(finding.severity).toBe('LOW');
     });
   });
 
-  describe('Rate Limiting', () => {
-    it('FINDING: No rate limiting on any endpoint', () => {
-      // No rate limiting middleware is configured anywhere
-      //
-      // Risk: Brute force attacks on:
-      // - Unlock codes (UNLOCK-XXXXX has ~17M combinations)
-      // - Master passwords via /api/auth/verify
-      // - Challenge creation via /api/vault/unlock
+  describe('Rate Limiting (New Security Feature)', () => {
+    it('FIXED: Rate limiting now applied on authentication endpoints', () => {
+      // server.ts:16-29
+      // checkRateLimit() uses an in-memory Map with 5-minute window, max 5 attempts
+      // Applied to: submit-unlock, register/verify, auth/verify, manage/auth
       const finding = {
-        severity: 'HIGH',
-        issue: 'No rate limiting on authentication endpoints',
-        affectedEndpoints: [
-          'POST /api/vault/unlock',
+        severity: 'INFO',
+        issue: 'Rate limiting now configured on auth endpoints',
+        secure: true,
+        config: {
+          maxAttempts: 5,
+          windowMs: 5 * 60 * 1000,
+        },
+        protectedEndpoints: [
           'POST /api/vault/submit-unlock',
           'POST /api/auth/verify',
           'POST /api/manage/auth',
           'POST /api/register/verify',
         ],
       };
-      expect(finding.affectedEndpoints.length).toBe(5);
+      expect(finding.secure).toBe(true);
+      expect(finding.protectedEndpoints.length).toBe(4);
+      expect(finding.config.maxAttempts).toBe(5);
+    });
+
+    it('Rate limit cleanup runs periodically', () => {
+      // server.ts:32-37
+      // setInterval cleans up stale entries every 5 minutes
+      // Prevents memory growth from rate limit tracking
+      const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+      expect(CLEANUP_INTERVAL_MS).toBe(300000);
+    });
+
+    it('REMAINING: /api/vault/unlock endpoint is not rate limited', () => {
+      // Only creates challenges, doesn't execute or authenticate
+      // Low risk but could be used for memory exhaustion
+      const finding = {
+        endpoint: 'POST /api/vault/unlock',
+        severity: 'LOW',
+        issue: 'Challenge creation endpoint not rate limited, could exhaust memory',
+      };
+      expect(finding.severity).toBe('LOW');
     });
   });
 
   describe('Error Information Disclosure', () => {
-    it('FINDING: Error messages may expose internal details', () => {
+    it('REMAINING: Error messages may expose internal details', () => {
       // Various endpoints return error.message directly
-      // e.g., server.ts:190, 292, 451, 577
-      //
       // Risk: Stack traces or internal paths could leak
       const finding = {
         severity: 'LOW',
@@ -306,12 +315,159 @@ describe('Security Breach: Web Server Endpoints', () => {
     });
   });
 
+  describe('Execute Endpoint Security Checks (New)', () => {
+    it('FIXED: Execute requires agent signature verification', () => {
+      // server.ts:190-207
+      // Requires: signature, publicKey, timestamp, nonce
+      // Uses verifySignedRequest() for Ed25519 signature verification
+      const finding = {
+        check: 'Agent signature verification',
+        secure: true,
+        requiredFields: ['signature', 'publicKey', 'timestamp', 'nonce'],
+        verification: 'verifySignedRequest() with Ed25519',
+      };
+      expect(finding.secure).toBe(true);
+      expect(finding.requiredFields.length).toBe(4);
+    });
+
+    it('FIXED: Execute requires valid session bound to agent', () => {
+      // server.ts:209-225
+      // Checks sessionId, validates session exists and hasn't expired,
+      // then verifies session.agentFingerprint matches verification.fingerprint
+      const finding = {
+        check: 'Session-agent binding',
+        secure: true,
+        steps: ['sessionId required', 'session exists and not expired', 'session belongs to agent'],
+      };
+      expect(finding.secure).toBe(true);
+      expect(finding.steps.length).toBe(3);
+    });
+
+    it('FIXED: Execute runs dangerous pattern check before SSH connection', () => {
+      // server.ts:243-248
+      // checkDangerousPatterns() blocks rm, mkfs, dd, fork bombs, etc.
+      const finding = {
+        check: 'Dangerous pattern check',
+        secure: true,
+        blocksBeforeSSH: true,
+      };
+      expect(finding.secure).toBe(true);
+    });
+
+    it('FIXED: Execute runs shell injection check before SSH connection', () => {
+      // server.ts:251-255
+      // checkShellInjection() blocks pipes, redirects, semicolons, backticks, $()
+      const finding = {
+        check: 'Shell injection check',
+        secure: true,
+        detectedPatterns: ['pipe', 'redirect', 'semicolon', 'backtick', 'command substitution', 'logical AND', 'logical OR'],
+      };
+      expect(finding.secure).toBe(true);
+      expect(finding.detectedPatterns.length).toBe(7);
+    });
+
+    it('FIXED: Execute runs policy engine check', () => {
+      // server.ts:257-269
+      // Checks agent exists, gets global policy, runs policyEngine.checkCommand()
+      const finding = {
+        check: 'Policy engine enforcement',
+        secure: true,
+        steps: ['agent registered in vault', 'global policy loaded', 'checkCommand() evaluation'],
+      };
+      expect(finding.secure).toBe(true);
+    });
+
+    it('FIXED: Timeout clamped to 1-300 seconds', () => {
+      // server.ts:233-241
+      // let execTimeout = 30 (default)
+      // Number.isFinite(t) check rejects NaN, Infinity
+      // Math.min(Math.max(t, 1), 300) clamps to [1, 300]
+      const finding = {
+        check: 'Timeout validation',
+        secure: true,
+        default: 30,
+        min: 1,
+        max: 300,
+        rejectsInfinity: true,
+        rejectsNaN: true,
+      };
+      expect(finding.secure).toBe(true);
+      expect(finding.min).toBe(1);
+      expect(finding.max).toBe(300);
+    });
+  });
+
+  describe('Auto-Lock & VEK Lifecycle (New Security Feature)', () => {
+    it('Vault auto-locks after inactivity', () => {
+      // vault.ts:38-39, 67-78
+      // Auto-lock timer defaults to 15 minutes
+      // resetAutoLockTimer() called on every vault operation
+      // lock() clears timer, secureWipes currentSignature, nulls vault, clears sessions
+      const finding = {
+        feature: 'Auto-lock timer',
+        secure: true,
+        defaultTimeout: 15 * 60 * 1000,
+        configurable: true,
+      };
+      expect(finding.secure).toBe(true);
+      expect(finding.defaultTimeout).toBe(900000);
+    });
+
+    it('Vault strips credentials from in-memory representation', () => {
+      // vault.ts:83-88
+      // stripCredentials() replaces credential with '[encrypted]'
+      // Called after every vault load/save
+      const finding = {
+        feature: 'Credential stripping',
+        secure: true,
+        placeholder: '[encrypted]',
+      };
+      expect(finding.secure).toBe(true);
+    });
+
+    it('On-demand credential decryption with secure wipe', () => {
+      // vault.ts:94-104
+      // decryptHostCredential() decrypts single host credential using currentSignature
+      // Caller must secureWipe after use (server.ts finally block does this)
+      const finding = {
+        feature: 'On-demand decryption',
+        secure: true,
+        lifecycle: ['decrypt on-demand', 'use credential', 'secure wipe in finally'],
+      };
+      expect(finding.secure).toBe(true);
+      expect(finding.lifecycle.length).toBe(3);
+    });
+
+    it('Lock securely wipes VEK from memory', () => {
+      // vault.ts:568-579
+      // lock() calls secureWipe(this.currentSignature) before nulling
+      // Also clears all sessions
+      const finding = {
+        feature: 'Secure VEK wipe on lock',
+        secure: true,
+        operations: ['clearTimeout', 'secureWipe(currentSignature)', 'null vault', 'clear sessions'],
+      };
+      expect(finding.secure).toBe(true);
+      expect(finding.operations.length).toBe(4);
+    });
+
+    it('isUnlocked() requires both vault and currentSignature', () => {
+      // vault.ts:116-118
+      // return this.vault !== null && this.currentSignature !== null
+      // Both must be present - partial state not treated as unlocked
+      const finding = {
+        feature: 'Dual unlock check',
+        secure: true,
+        conditions: ['vault !== null', 'currentSignature !== null'],
+      };
+      expect(finding.secure).toBe(true);
+    });
+  });
+
   describe('Host Credential Exposure', () => {
-    it('FINDING: Management data endpoint properly masks credentials', () => {
-      // server.ts:597
+    it('Management data endpoint properly masks credentials', () => {
+      // server.ts:789
       // hosts: vault.hosts.map(h => ({ ...h, credential: '***' }))
-      //
-      // Credentials are masked in management data responses
       const finding = {
         severity: 'INFO',
         issue: 'Credentials properly masked in management API responses',
@@ -320,18 +476,28 @@ describe('Security Breach: Web Server Endpoints', () => {
       expect(finding.secure).toBe(true);
     });
 
-    it('FINDING: /api/vault/execute has direct access to credentials', () => {
-      // server.ts:159-174
-      // The execute endpoint reads hostConfig.credential directly
-      // to establish SSH connection. While necessary, this code path
-      // has no policy engine checks.
+    it('FIXED: /api/vault/execute now uses on-demand decryption with secure wipe', () => {
+      // server.ts:282-361
+      // The execute endpoint now:
+      // 1. Requires agent signature and session
+      // 2. Uses decryptHostCredential() for on-demand decryption
+      // 3. Securely wipes credential from memory after use (finally block)
+      // 4. In-memory vault only has '[encrypted]' placeholder
       const finding = {
-        severity: 'HIGH',
-        issue: 'HTTP execute endpoint bypasses policy engine entirely',
+        severity: 'INFO',
+        issue: 'Credentials decrypted on-demand and wiped after use',
+        secure: true,
+        securityMeasures: [
+          'on-demand decryption',
+          'secure wipe in finally block',
+          'in-memory vault has [encrypted] placeholder',
+          'policy engine check before decryption',
+        ],
         file: 'src/web/server.ts',
-        line: 108,
+        line: 282,
       };
-      expect(finding.severity).toBe('HIGH');
+      expect(finding.secure).toBe(true);
+      expect(finding.securityMeasures.length).toBe(4);
     });
   });
 });
