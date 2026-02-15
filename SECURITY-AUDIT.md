@@ -18,11 +18,11 @@ The audit identified **critical architectural flaws** that fundamentally undermi
 | Severity | Count |
 |----------|-------|
 | CRITICAL | 5 |
-| HIGH | 13 |
-| MEDIUM | 23 |
+| HIGH | 14 |
+| MEDIUM | 27 |
 | LOW | 7 |
 | INFORMATIONAL | 5 |
-| **TOTAL** | **53** |
+| **TOTAL** | **58** |
 
 ---
 
@@ -350,7 +350,19 @@ The SSH `ConnectConfig` does not specify algorithm preferences. The ssh2 library
 
 ---
 
-### HIGH-12: SSH Command Injection via Unvalidated Input
+### HIGH-12: MCP SDK DNS Rebinding CVE (CVE-2025-66414) via Broad Version Specifier
+
+**File:** `package.json`
+**Domain:** Dependency, Supply Chain
+
+**Description:**
+The `@modelcontextprotocol/sdk` is specified as `^1.0.0`, which permits any version from 1.0.0 to 1.x.x. All versions before 1.24.0 are vulnerable to CVE-2025-66414 (DNS rebinding -- no protection by default for HTTP servers). While the current lockfile resolves to 1.26.0 (patched), any fresh install without the lockfile or a lockfile regeneration could pull a vulnerable version. This is the primary interface through which all vault operations are exposed.
+
+**Fix:** Pin to `"@modelcontextprotocol/sdk": "^1.26.0"` to guarantee the DNS rebinding fix is always present.
+
+---
+
+### HIGH-13: SSH Command Injection via Unvalidated Input
 
 **File:** `src/ssh/executor.ts`
 **Domain:** Injection
@@ -368,7 +380,7 @@ Commands passed to the SSH executor are forwarded directly to the remote SSH ser
 
 ---
 
-### HIGH-13: Policy Dangerous Pattern Detection Easily Bypassed
+### HIGH-14: Policy Dangerous Pattern Detection Easily Bypassed
 
 **File:** `src/policy/engine.ts`
 **Domain:** Authorization, Injection
@@ -619,6 +631,46 @@ res.json({
 
 ---
 
+### MEDIUM-24: Docker Base Image Unpinned with No System Package Updates
+
+**File:** `Dockerfile`
+
+The base image `node:20-alpine` is a floating tag not pinned to a digest. No `apk update && apk upgrade` is run, leaving known Alpine CVEs (OpenSSL ALPINE-CVE-2025-69419 CVSS 7.4, ALPINE-CVE-2025-69420 CVSS 7.5) unpatched. Every `docker build` may silently pull a different base image.
+
+**Fix:** Pin to specific digest: `FROM node:20-alpine@sha256:<hash>`; add `RUN apk update && apk upgrade --no-cache`.
+
+---
+
+### MEDIUM-25: Dev Dependencies Shipped to Production Docker Image
+
+**File:** `Dockerfile`
+
+The Dockerfile copies entire `node_modules` from builder stage which includes all 282 dev dependencies (vitest, eslint, typescript, esbuild). The vulnerable esbuild (GHSA-67mh-4wv8-2f99), deprecated glob, and other dev-only packages are loadable in production, dramatically inflating the attack surface.
+
+**Fix:** In production stage, install only production deps: `RUN npm ci --omit=dev`.
+
+---
+
+### MEDIUM-26: Dual Express Installation (v4 + v5) Doubles Attack Surface
+
+**Files:** `package.json`, `package-lock.json`
+
+The project depends on `express@^4.18.2` directly while `@modelcontextprotocol/sdk@1.26.0` pulls `express@5.2.1`. Both are installed and loaded at runtime. Middleware behavior differences between v4 and v5 (query parsing, cookie handling) could cause subtle security inconsistencies.
+
+**Fix:** Migrate to `express@^5.2.0` to deduplicate and align with MCP SDK dependency.
+
+---
+
+### MEDIUM-27: All Dependencies Use Broad Caret (^) Ranges
+
+**File:** `package.json`
+
+Every dependency uses `^` range specifier. For a security-critical SSH credential manager, this is too permissive. Key risks: `^1.0.0` for MCP SDK spans 26 minor versions including the DNS rebinding CVE; `^4.18.2` for Express spans 5 CVEs; `^9.0.0` for SimpleWebAuthn allows all 9.x releases (currently 4 major versions behind at v13).
+
+**Fix:** Pin security-critical deps to exact versions or tighter ranges; raise lower bounds to post-CVE versions.
+
+---
+
 ## LOW Findings
 
 ### LOW-01: Modulo Bias in Unlock Code Generation
@@ -833,8 +885,9 @@ HIGH-01 (Nonce cleanup) + MEDIUM-13 (State lost on restart)
 | HIGH-09 | Fix DOM XSS in approval page (escapeHtml) | Low |
 | HIGH-10 | Fix DOM XSS in management UI (escapeHtml) | Low |
 | HIGH-11 | Restrict SSH algorithms to modern ciphers | Low |
-| HIGH-12 | Sanitize SSH commands; block shell metacharacters | Medium |
-| HIGH-13 | Strengthen policy engine with allowlist approach | High |
+| HIGH-12 | Pin MCP SDK to ^1.26.0 (DNS rebinding CVE) | Low |
+| HIGH-13 | Sanitize SSH commands; block shell metacharacters | Medium |
+| HIGH-14 | Strengthen policy engine with allowlist approach | High |
 | MEDIUM-08 | Default bind to 127.0.0.1 | Low |
 | MEDIUM-14 | Add security headers (helmet) | Low |
 | MEDIUM-15 | Add rate limiting on auth endpoints | Low |
@@ -863,6 +916,10 @@ HIGH-01 (Nonce cleanup) + MEDIUM-13 (State lost on restart)
 | MEDIUM-21 | Fix unlock code DOM XSS (use textContent) | Low |
 | MEDIUM-22 | Fix unlock code DOM XSS (use textContent) | Low |
 | MEDIUM-23 | Use allowlist in management API data response | Low |
+| MEDIUM-24 | Pin Docker base image + run apk upgrade | Low |
+| MEDIUM-25 | Ship only production deps in Docker | Low |
+| MEDIUM-26 | Migrate to Express 5 to deduplicate | Medium |
+| MEDIUM-27 | Tighten dependency version ranges | Low |
 
 ### Low Priority (P3) - Within 90 days
 
