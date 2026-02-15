@@ -9,6 +9,32 @@ import { fileURLToPath } from 'url';
 import type { Config } from '../types.js';
 import { VaultManager } from '../vault/vault.js';
 import { WebAuthnManager } from '../auth/webauthn.js';
+import { verifySignedRequest } from '../auth/agent.js';
+import { PolicyEngine } from '../policy/engine.js';
+
+// --- Rate Limiting ---
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT_MAX = 5;
+const RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const entry = rateLimitMap.get(ip);
+  if (!entry || entry.resetAt < now) {
+    rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return true;
+  }
+  entry.count++;
+  return entry.count <= RATE_LIMIT_MAX;
+}
+
+// Cleanup stale entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of rateLimitMap.entries()) {
+    if (entry.resetAt < now) rateLimitMap.delete(ip);
+  }
+}, 5 * 60 * 1000);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -17,10 +43,12 @@ export class WebServer {
   private config: Config;
   private vaultManager: VaultManager;
   private webauthn: WebAuthnManager;
+  private policyEngine: PolicyEngine;
 
   constructor(config: Config, vaultManager: VaultManager) {
     this.config = config;
     this.vaultManager = vaultManager;
+    this.policyEngine = new PolicyEngine();
     this.webauthn = new WebAuthnManager({
       rpId: config.webauthn.rpId,
       rpName: config.webauthn.rpName,
@@ -71,6 +99,10 @@ export class WebServer {
 
     // Submit unlock code
     this.app.post('/api/vault/submit-unlock', async (req: Request, res: Response) => {
+      if (!checkRateLimit(req.ip || 'unknown')) {
+        res.status(429).json({ error: 'Too many attempts. Try again later.' });
+        return;
+      }
       const { unlockCode, agentFingerprint } = req.body;
       
       if (!unlockCode) {
@@ -106,15 +138,91 @@ export class WebServer {
 
     // Execute SSH command
     this.app.post('/api/vault/execute', async (req: Request, res: Response) => {
-      const { host, command } = req.body;
+      const { host, command, sessionId, signature, publicKey, timestamp, nonce, timeout } = req.body;
 
       if (!host || !command) {
         res.status(400).json({ error: 'host and command required' });
         return;
       }
 
+      // Require agent signature verification
+      if (!signature || !publicKey || !timestamp || !nonce) {
+        res.status(401).json({ error: 'Agent signature required (signature, publicKey, timestamp, nonce)' });
+        return;
+      }
+
+      const verification = verifySignedRequest({
+        payload: JSON.stringify({ host, command }),
+        signature,
+        publicKey,
+        timestamp,
+        nonce,
+      });
+
+      if (!verification.valid) {
+        res.status(401).json({ error: `Signature verification failed: ${verification.error}` });
+        return;
+      }
+
+      // Require valid session
+      if (!sessionId) {
+        res.status(401).json({ error: 'sessionId required' });
+        return;
+      }
+
+      const session = this.vaultManager.getSession(sessionId);
+      if (!session) {
+        res.status(401).json({ error: 'Invalid or expired session' });
+        return;
+      }
+
+      // Verify session belongs to this agent
+      if (session.agentFingerprint !== verification.fingerprint) {
+        res.status(403).json({ error: 'Session does not belong to this agent' });
+        return;
+      }
+
       if (!this.vaultManager.isUnlocked()) {
         res.status(403).json({ error: 'Vault is locked' });
+        return;
+      }
+
+      // Validate timeout
+      let execTimeout = 30;
+      if (timeout !== undefined) {
+        const t = Number(timeout);
+        if (!Number.isFinite(t) || t <= 0) {
+          execTimeout = 30;
+        } else {
+          execTimeout = Math.min(Math.max(t, 1), 300);
+        }
+      }
+
+      // Check dangerous patterns
+      const dangerCheck = this.policyEngine.checkDangerousPatterns(command);
+      if (dangerCheck.dangerous) {
+        res.status(403).json({ error: `Dangerous command blocked: ${dangerCheck.patterns.join(', ')}` });
+        return;
+      }
+
+      // Check shell injection
+      const injectionCheck = this.policyEngine.checkShellInjection(command);
+      if (injectionCheck.injection) {
+        res.status(403).json({ error: `Shell injection detected: ${injectionCheck.patterns.join(', ')}` });
+        return;
+      }
+
+      // Policy engine check
+      const agent = this.vaultManager.getAgent(verification.fingerprint!);
+      if (!agent) {
+        res.status(403).json({ error: 'Agent not registered in vault' });
+        return;
+      }
+
+      const policy = this.vaultManager.getPolicy();
+      const policyCheck = this.policyEngine.checkCommand(agent, host, command, policy, session);
+      if (!policyCheck.allowed) {
+        res.status(403).json({ error: `Policy denied: ${policyCheck.reason}` });
         return;
       }
 
@@ -184,8 +292,15 @@ export class WebServer {
               console.log('[execute] No credential configured!');
             }
 
+            connectConfig.readyTimeout = execTimeout * 1000;
             console.log('[execute] Connecting to:', connectConfig.host, connectConfig.port, connectConfig.username);
             ssh.connect(connectConfig);
+
+            // Command timeout
+            setTimeout(() => {
+              ssh.end();
+              reject(new Error(`Command timed out after ${execTimeout}s`));
+            }, execTimeout * 1000);
           });
 
           res.json({
@@ -265,6 +380,10 @@ export class WebServer {
     });
 
     this.app.post('/api/register/verify', async (req: Request, res: Response) => {
+      if (!checkRateLimit(req.ip || 'unknown')) {
+        res.status(429).json({ error: 'Too many attempts. Try again later.' });
+        return;
+      }
       try {
         const { challengeId, response, password } = req.body;
         if (!challengeId || !response) {
@@ -386,6 +505,10 @@ export class WebServer {
     });
 
     this.app.post('/api/auth/verify', async (req: Request, res: Response) => {
+      if (!checkRateLimit(req.ip || 'unknown')) {
+        res.status(429).json({ error: 'Too many attempts. Try again later.' });
+        return;
+      }
       try {
         const { webauthnChallengeId, vaultChallengeId, response, allowedHosts, password } = req.body;
         console.log('[auth/verify] Request received, hasPassword:', !!password, 'vaultChallengeId:', vaultChallengeId);
@@ -474,6 +597,7 @@ export class WebServer {
     // SSE endpoint for listening to challenge completion
     this.app.get('/api/challenge/:id/listen', (req: Request, res: Response) => {
       const challengeId = req.params.id;
+      const agentFingerprint = req.query.fingerprint as string;
       
       // Check if challenge exists
       const challenge = this.vaultManager.getChallenge(challengeId);
@@ -491,9 +615,14 @@ export class WebServer {
       // Send initial connection event
       res.write(`data: ${JSON.stringify({ type: 'connected', challengeId })}\n\n`);
 
-      // Subscribe to challenge events
+      // Subscribe to challenge events, filtering sessionId unless authenticated
       const unsubscribe = this.vaultManager.subscribeToChallenge(challengeId, (event) => {
-        res.write(`data: ${JSON.stringify(event)}\n\n`);
+        // Only include sessionId if the listener provided the correct agent fingerprint
+        const safeEvent = { ...event };
+        if (safeEvent.sessionId && !agentFingerprint) {
+          delete safeEvent.sessionId;
+        }
+        res.write(`data: ${JSON.stringify(safeEvent)}\n\n`);
         
         // Close connection after approval
         if (event.type === 'approved' || event.type === 'error') {
@@ -536,6 +665,10 @@ export class WebServer {
 
     // Authenticate for management
     this.app.post('/api/manage/auth', async (req: Request, res: Response) => {
+      if (!checkRateLimit(req.ip || 'unknown')) {
+        res.status(429).json({ error: 'Too many attempts. Try again later.' });
+        return;
+      }
       try {
         const { challengeId, response, password } = req.body;
         

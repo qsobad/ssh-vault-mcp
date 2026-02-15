@@ -5,8 +5,8 @@
 import nacl from 'tweetnacl';
 import { sha256 } from '@noble/hashes/sha2.js';
 
-// Request validity window (5 minutes)
-const REQUEST_VALIDITY_MS = 5 * 60 * 1000;
+// Request validity window (30 seconds)
+const REQUEST_VALIDITY_MS = 30 * 1000;
 
 // Used nonces for replay protection (cleared periodically)
 const usedNonces = new Set<string>();
@@ -159,5 +159,5 @@ export function cleanupNonces(): void {
   usedNonces.clear();
 }
 
-// Auto-cleanup every 10 minutes
-setInterval(cleanupNonces, 10 * 60 * 1000);
+// Auto-cleanup every 30 seconds
+setInterval(cleanupNonces, 30 * 1000);

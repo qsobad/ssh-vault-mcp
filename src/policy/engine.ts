@@ -170,7 +170,7 @@ export class PolicyEngine {
     patterns: string[];
   } {
     const dangerousPatterns = [
-      { pattern: /rm\s+(-rf?|--recursive)?\s*\/(?!\s|$)/, description: 'rm with root path' },
+      { pattern: /rm\s+(-[a-zA-Z]*\s+)*\//, description: 'rm with root path' },
       { pattern: />\s*\/dev\/sd[a-z]/, description: 'write to disk device' },
       { pattern: /mkfs\./, description: 'format filesystem' },
       { pattern: /dd\s+.*of=\/dev\//, description: 'dd to device' },
@@ -190,6 +190,38 @@ export class PolicyEngine {
 
     return {
       dangerous: found.length > 0,
+      patterns: found,
+    };
+  }
+
+  /**
+   * Check if a command contains shell injection metacharacters
+   */
+  checkShellInjection(command: string): {
+    injection: boolean;
+    patterns: string[];
+  } {
+    const shellPatterns: { pattern: RegExp; description: string }[] = [
+      { pattern: /\|/, description: 'pipe' },
+      { pattern: />>/, description: 'append redirect' },
+      { pattern: /(?<!>)>(?!>)/, description: 'redirect' },
+      { pattern: /</, description: 'input redirect' },
+      { pattern: /;/, description: 'command separator' },
+      { pattern: /&&/, description: 'logical AND' },
+      { pattern: /\|\|/, description: 'logical OR' },
+      { pattern: /`/, description: 'backtick substitution' },
+      { pattern: /\$\(/, description: 'command substitution' },
+    ];
+
+    const found: string[] = [];
+    for (const { pattern, description } of shellPatterns) {
+      if (pattern.test(command)) {
+        found.push(description);
+      }
+    }
+
+    return {
+      injection: found.length > 0,
       patterns: found,
     };
   }
