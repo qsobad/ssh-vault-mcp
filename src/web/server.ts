@@ -371,6 +371,7 @@ export class WebServer {
     this.app.post('/api/auth/verify', async (req: Request, res: Response) => {
       try {
         const { webauthnChallengeId, vaultChallengeId, response, allowedHosts, password } = req.body;
+        console.log('[auth/verify] Request received, hasPassword:', !!password, 'vaultChallengeId:', vaultChallengeId);
         
         if (!webauthnChallengeId || !vaultChallengeId || !response) {
           res.status(400).json({ 

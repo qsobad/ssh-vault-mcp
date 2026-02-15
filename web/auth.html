@@ -215,19 +215,21 @@
         <div class="detail" id="actionDetail"></div>
       </div>
 
-      <div style="margin-bottom: 16px; text-align: left;">
-        <label style="display: block; margin-bottom: 6px; color: var(--text-dim); font-size: 14px;">Master Password</label>
-        <input type="password" id="masterPassword" placeholder="Enter master password" style="width: 100%; padding: 12px; background: #0d0d0d; border: 1px solid #2a2a2a; border-radius: 8px; color: var(--text); font-size: 14px;">
-      </div>
+      <div id="authControls">
+        <div style="margin-bottom: 16px; text-align: left;">
+          <label style="display: block; margin-bottom: 6px; color: var(--text-dim); font-size: 14px;">Master Password</label>
+          <input type="password" id="masterPassword" placeholder="Enter master password" style="width: 100%; padding: 12px; background: #0d0d0d; border: 1px solid #2a2a2a; border-radius: 8px; color: var(--text); font-size: 14px;">
+        </div>
 
-      <button class="btn btn-primary" id="authBtn" onclick="authenticate()">
-        <span class="btn-icon">👆</span>
-        Use Passkey
-      </button>
+        <button class="btn btn-primary" id="authBtn" onclick="authenticate()">
+          <span class="btn-icon">👆</span>
+          Use Passkey
+        </button>
 
-      <div class="loading" id="loading">
-        <div class="spinner"></div>
-        <span>Verifying...</span>
+        <div class="loading" id="loading">
+          <div class="spinner"></div>
+          <span>Verifying...</span>
+        </div>
       </div>
 
       <div class="result" id="result">
@@ -416,6 +418,7 @@
         },
       });
 
+      console.log('[auth] Passkey credential obtained, sending verify request...');
       // Verify authentication
       const verifyRes = await fetch('/api/auth/verify', {
         method: 'POST',
@@ -441,6 +444,7 @@
       });
 
       const result = await verifyRes.json();
+      console.log('[auth] Verify response:', result);
 
       if (!result.success) {
         throw new Error(result.error || 'Authentication failed');
@@ -453,7 +457,13 @@
       }
     }
 
+    function hideAuthControls() {
+      document.getElementById('authControls').style.display = 'none';
+      document.getElementById('subtitle').style.display = 'none';
+    }
+
     function showAutoUnlocked() {
+      hideAuthControls();
       const result = document.getElementById('result');
       const content = document.getElementById('resultContent');
 
@@ -469,6 +479,7 @@
     }
 
     function showUnlockCode(code) {
+      hideAuthControls();
       const result = document.getElementById('result');
       const content = document.getElementById('resultContent');
 
@@ -492,6 +503,7 @@
     }
 
     function showSuccess(message) {
+      hideAuthControls();
       const result = document.getElementById('result');
       const content = document.getElementById('resultContent');
 
