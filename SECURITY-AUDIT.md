@@ -17,12 +17,12 @@ The audit identified **critical architectural flaws** that fundamentally undermi
 
 | Severity | Count |
 |----------|-------|
-| CRITICAL | 3 |
-| HIGH | 12 |
-| MEDIUM | 20 |
-| LOW | 6 |
-| INFORMATIONAL | 4 |
-| **TOTAL** | **45** |
+| CRITICAL | 5 |
+| HIGH | 13 |
+| MEDIUM | 22 |
+| LOW | 7 |
+| INFORMATIONAL | 5 |
+| **TOTAL** | **52** |
 
 ---
 
@@ -120,6 +120,46 @@ this.app.post('/api/register/options', async (req: Request, res: Response) => {
 4. Attacker now owns the vault with their passkey
 
 **Fix:** Check if vault already exists before allowing registration; require existing authenticated session for re-registration.
+
+---
+
+### CRITICAL-04: No TLS -- All Traffic Including Credentials Transmitted in Cleartext
+
+**File:** `src/config.ts:10-27`, `src/web/server.ts:613-618`
+**Domain:** Network, Transport Security
+
+**Description:**
+The web server has no TLS support whatsoever -- there is no `https.createServer()` call anywhere in the codebase. Default config uses `http://localhost:3001`. All API calls including Passkey registration/authentication, vault management (which transmits SSH private keys and passwords in POST bodies), management session Bearer tokens, and SSE challenge notifications travel in cleartext. WebAuthn is designed for HTTPS origins; browsers will refuse Passkey operations on HTTP except on localhost.
+
+**Attack Scenario:**
+1. Management page sends SSH private keys via `POST /api/manage/hosts` over HTTP
+2. Any network observer (Wi-Fi sniffer, corporate proxy) captures credentials in transit
+3. Bearer tokens in `Authorization` headers are captured for session hijacking
+
+**Fix:** Implement TLS support in the web server or mandate deployment behind a TLS-terminating reverse proxy. Reject non-localhost `http://` origins in config validation.
+
+---
+
+### CRITICAL-05: Missing SSH Host Key Verification -- Complete MITM Exposure
+
+**File:** `src/ssh/executor.ts:41-46`, `src/ssh/executor.ts:161-166`
+**Domain:** Network, SSH Protocol
+
+**Description:**
+The SSH `ConnectConfig` is constructed without any `hostVerify` callback, `hostHash`, or `hostKey` properties. The ssh2 library will accept **any host key** presented by the remote server, enabling trivial man-in-the-middle attacks on every SSH connection. An attacker performing ARP spoofing, DNS poisoning, or BGP hijacking can intercept all SSH connections, capture transmitted credentials, and read all commands and output.
+
+**Vulnerable Code:**
+```typescript
+const connectConfig: ConnectConfig = {
+  host: host.hostname,
+  port: host.port,
+  username: host.username,
+  readyTimeout: 10000,
+  // No hostVerify, no algorithms restriction
+};
+```
+
+**Fix:** Add `hostVerify` callback comparing against stored host key fingerprints; add `expectedHostKeyFingerprint` field to Host type; restrict algorithms to modern ciphers only.
 
 ---
 
@@ -298,7 +338,19 @@ Multiple rendering functions (`renderHosts`, `renderAgents`, `renderSessions`) b
 
 ---
 
-### HIGH-11: SSH Command Injection via Unvalidated Input
+### HIGH-11: No SSH Algorithm Restrictions -- Weak Cipher Downgrade
+
+**File:** `src/ssh/executor.ts:41-46`
+**Domain:** Network, SSH Protocol
+
+**Description:**
+The SSH `ConnectConfig` does not specify algorithm preferences. The ssh2 library will negotiate using whatever algorithms the remote server supports, including deprecated or weak algorithms like `diffie-hellman-group1-sha1`, `ssh-dss`, `arcfour`, or `hmac-md5`. An attacker capable of downgrade attacks could force weak algorithm negotiation.
+
+**Fix:** Explicitly set `algorithms` property to allow only modern ciphers: `curve25519-sha256` (kex), `ssh-ed25519` (hostkey), `aes256-gcm@openssh.com` (cipher), `hmac-sha2-256-etm@openssh.com` (hmac).
+
+---
+
+### HIGH-12: SSH Command Injection via Unvalidated Input
 
 **File:** `src/ssh/executor.ts`
 **Domain:** Injection
@@ -316,7 +368,7 @@ Commands passed to the SSH executor are forwarded directly to the remote SSH ser
 
 ---
 
-### HIGH-12: Policy Dangerous Pattern Detection Easily Bypassed
+### HIGH-13: Policy Dangerous Pattern Detection Easily Bypassed
 
 **File:** `src/policy/engine.ts`
 **Domain:** Authorization, Injection
@@ -499,17 +551,27 @@ CORS origin comes from config file. If set to `*` or overly broad, cross-origin 
 
 ---
 
-### MEDIUM-17: SSH Host Key Verification Disabled
+### MEDIUM-17: DNS Rebinding Attack via Missing Host Header Validation
 
-**File:** `src/ssh/executor.ts`
+**File:** `src/web/server.ts:36-39`
 
-The SSH client does not validate host keys, making connections vulnerable to man-in-the-middle attacks. Known host verification is not implemented.
+The Express CORS middleware only sets response headers but does **not** block requests from unauthorized origins. With default CORS origin `http://localhost:3001` and no Host header validation, DNS rebinding can bypass same-origin policy. Attacker's page can send requests to vault server -- the route handler still executes even though CORS headers prevent response reading.
 
-**Fix:** Implement host key verification using a known_hosts file or per-host key pinning.
+**Fix:** Add Host header validation middleware; switch CORS to return error for mismatched origins instead of just omitting headers.
 
 ---
 
-### MEDIUM-18: SSH Credentials Held in Memory During Session Lifetime
+### MEDIUM-18: Unbounded SSH Output Buffer -- Memory Exhaustion DoS
+
+**File:** `src/ssh/executor.ts:69-75`
+
+The `execute` method concatenates all stdout/stderr data into unbounded strings. A malicious SSH host or long-running command (`cat /dev/urandom`) can produce gigabytes of output, exhausting server memory and crashing the process.
+
+**Fix:** Implement max output size limit (e.g., 10MB); close stream and reject on exceeded limit.
+
+---
+
+### MEDIUM-19: Missing Input Validation on Host/Agent Management APIs
 
 **File:** `src/vault/vault.ts`
 
@@ -519,7 +581,7 @@ Decrypted vault data (including SSH private keys and passwords) remains in memor
 
 ---
 
-### MEDIUM-19: Missing Input Validation on Host/Agent Management APIs
+### MEDIUM-21: Missing Input Validation on Host/Agent Management APIs
 
 **File:** `src/web/server.ts:457-549`
 
@@ -529,7 +591,7 @@ The `/api/manage/hosts` and `/api/manage/agents` endpoints accept arbitrary inpu
 
 ---
 
-### MEDIUM-20: DOM XSS via Unlock Code Injection
+### MEDIUM-22: DOM XSS via Unlock Code Injection
 
 **File:** `web/auth.html:451-465`
 
@@ -601,6 +663,16 @@ The `extractBaseCommand()` function skips known wrappers (`sudo`, `env`, `nohup`
 
 ---
 
+### LOW-07: Unbounded Management Session Map
+
+**File:** `src/web/server.ts:369,419-423`
+
+The `manageSessions` Map has no size limit. An attacker who repeatedly authenticates can create unlimited sessions consuming memory. Session tokens stored in JavaScript variables are accessible to any XSS payload (no HttpOnly protection).
+
+**Fix:** Cap max concurrent management sessions; clear oldest when limit reached.
+
+---
+
 ## INFORMATIONAL Findings
 
 ### INFO-01: `.gitignore` Missing `.backup` and `.tmp` Exclusions
@@ -624,6 +696,14 @@ Read-write bind mount with root-owned container creates permission management is
 **File:** `tsconfig.json`
 
 `sourceMap: true` generates `.js.map` files that could aid reverse engineering in production.
+
+---
+
+### INFO-05: Unnecessary MCP Port 3000 Exposed in Docker
+
+**Files:** `docker-compose.yml:7`, `Dockerfile:34`
+
+Port 3000 is exposed but MCP uses stdio transport (`StdioServerTransport`), not TCP. No network listener exists on port 3000. Wastes a port mapping and creates confusion.
 
 ---
 
@@ -719,6 +799,8 @@ HIGH-01 (Nonce cleanup) + MEDIUM-13 (State lost on restart)
 | CRITICAL-01 | Replace hardcoded VEK with proper key derivation from WebAuthn signature | High |
 | CRITICAL-02 | Set `0o600` permissions on all vault file operations | Low |
 | CRITICAL-03 | Add vault existence check to registration endpoints | Low |
+| CRITICAL-04 | Implement TLS or mandate reverse proxy with TLS | Medium |
+| CRITICAL-05 | Add SSH host key verification with stored fingerprints | Medium |
 | HIGH-03 | Increase unlock code entropy + add rate limiting | Medium |
 | HIGH-08 | Require active session for `execute_command` | Low |
 
@@ -732,12 +814,12 @@ HIGH-01 (Nonce cleanup) + MEDIUM-13 (State lost on restart)
 | HIGH-05 | Validate vault path in configuration | Low |
 | HIGH-09 | Fix DOM XSS in approval page (escapeHtml) | Low |
 | HIGH-10 | Fix DOM XSS in management UI (escapeHtml) | Low |
-| HIGH-11 | Sanitize SSH commands; block shell metacharacters | Medium |
-| HIGH-12 | Strengthen policy engine with allowlist approach | High |
+| HIGH-11 | Restrict SSH algorithms to modern ciphers | Low |
+| HIGH-12 | Sanitize SSH commands; block shell metacharacters | Medium |
+| HIGH-13 | Strengthen policy engine with allowlist approach | High |
 | MEDIUM-08 | Default bind to 127.0.0.1 | Low |
 | MEDIUM-14 | Add security headers (helmet) | Low |
 | MEDIUM-15 | Add rate limiting on auth endpoints | Low |
-| MEDIUM-17 | Implement SSH host key verification | Medium |
 
 ### Medium Priority (P2) - Within 30 days
 
@@ -756,16 +838,19 @@ HIGH-01 (Nonce cleanup) + MEDIUM-13 (State lost on restart)
 | MEDIUM-12 | Harden config file search path | Low |
 | MEDIUM-13 | Persist nonces or reject pre-restart timestamps | Medium |
 | MEDIUM-16 | Validate CORS origin configuration | Low |
-| MEDIUM-18 | Minimize credential time in memory | Medium |
-| MEDIUM-19 | Add Zod validation to management API inputs | Low |
-| MEDIUM-20 | Fix unlock code DOM XSS (use textContent) | Low |
+| MEDIUM-17 | Add Host header validation for DNS rebinding | Low |
+| MEDIUM-18 | Cap SSH output buffer size (10MB) | Low |
+| MEDIUM-19 | Minimize credential time in memory | Medium |
+| MEDIUM-20 | SSH credentials held in memory too long | Medium |
+| MEDIUM-21 | Add Zod validation to management API inputs | Low |
+| MEDIUM-22 | Fix unlock code DOM XSS (use textContent) | Low |
 
 ### Low Priority (P3) - Within 90 days
 
 | ID | Finding | Effort |
 |----|---------|--------|
-| LOW-01 to LOW-06 | Various low-severity hardening | Low each |
-| INFO-01 to INFO-04 | Informational improvements | Low each |
+| LOW-01 to LOW-07 | Various low-severity hardening | Low each |
+| INFO-01 to INFO-05 | Informational improvements | Low each |
 
 ---
 
