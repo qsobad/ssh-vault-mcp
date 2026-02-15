@@ -275,6 +275,12 @@
       }
     }
 
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
     function displayChallengeInfo(info) {
       const actionInfo = document.getElementById('actionInfo');
       const actionDetail = document.getElementById('actionDetail');
@@ -286,12 +292,12 @@
         document.getElementById('title').textContent = 'Approve Command';
         document.getElementById('subtitle').textContent = 'An agent is requesting permission';
         
-        let html = `<div class="host">Host: ${info.host}</div>`;
+        let html = `<div class="host">Host: ${escapeHtml(info.host || '')}</div>`;
         if (info.commands && info.commands.length > 0) {
-          html += '<div class="command">' + info.commands.join('<br>') + '</div>';
+          html += '<div class="command">' + info.commands.map(c => escapeHtml(c)).join('<br>') + '</div>';
         }
         if (info.agent) {
-          html += `<div style="margin-top: 8px; font-size: 12px;">Agent: ${info.agent}</div>`;
+          html += `<div style="margin-top: 8px; font-size: 12px;">Agent: ${escapeHtml(info.agent)}</div>`;
         }
         
         actionDetail.innerHTML = html;
@@ -466,11 +472,18 @@
       const result = document.getElementById('result');
       const content = document.getElementById('resultContent');
 
-      content.innerHTML = `
-        <div>✅ Authentication successful!</div>
-        <div class="unlock-code">${code}</div>
-        <div class="copy-hint">Copy this code and provide it to the agent</div>
-      `;
+      const successDiv = document.createElement('div');
+      successDiv.textContent = '✅ Authentication successful!';
+      const codeDiv = document.createElement('div');
+      codeDiv.className = 'unlock-code';
+      codeDiv.textContent = code;
+      const hintDiv = document.createElement('div');
+      hintDiv.className = 'copy-hint';
+      hintDiv.textContent = 'Copy this code and provide it to the agent';
+      content.innerHTML = '';
+      content.appendChild(successDiv);
+      content.appendChild(codeDiv);
+      content.appendChild(hintDiv);
 
       result.className = 'result success';
 

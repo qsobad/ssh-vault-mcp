@@ -518,6 +518,17 @@ export class MCPServer {
     }
 
     const session = this.vaultManager.getSessionByAgent(fingerprint);
+    if (!session) {
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            error: 'No active session. Use request_unlock to create one.',
+          }, null, 2),
+        }],
+        isError: true,
+      };
+    }
     const policy = this.vaultManager.getPolicy();
 
     // Check policy

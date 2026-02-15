@@ -216,6 +216,12 @@ export class WebServer {
     // Registration endpoints (for initial setup)
     this.app.post('/api/register/options', async (req: Request, res: Response) => {
       try {
+        // CRITICAL-03: Prevent vault takeover by checking if vault already exists
+        if (await this.vaultManager.vaultExists()) {
+          res.status(403).json({ error: 'Vault already exists. Cannot re-register.' });
+          return;
+        }
+
         const { userId, userName } = req.body;
         if (!userId || !userName) {
           res.status(400).json({ error: 'userId and userName required' });
