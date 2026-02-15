@@ -1,0 +1,36 @@
+# SSH Vault MCP Configuration
+# Copy this to config.yml and customize
+
+server:
+  port: 3000
+  host: 0.0.0.0
+
+vault:
+  path: ./data/vault.enc
+  backup: true
+
+# WebAuthn / Passkey settings
+webauthn:
+  # Must match your domain exactly
+  rp_id: "vault.example.com"
+  rp_name: "SSH Vault"
+  # Origin must include protocol and match rp_id
+  origin: "https://vault.example.com"
+
+# Web server for authentication pages
+web:
+  port: 3001
+  # External URL that users will access
+  external_url: "https://vault.example.com"
+
+# Session settings
+session:
+  # single: each command needs approval
+  # session: approval lasts for the session
+  # time_window: approval lasts N minutes
+  mode: session
+  timeout_minutes: 30
+
+logging:
+  level: info
+  # file: ./logs/ssh-vault.log

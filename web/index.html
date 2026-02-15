@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SSH Vault - Authentication</title>
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --card-bg: #141414;
+      --border: #2a2a2a;
+      --text: #e5e5e5;
+      --text-dim: #888;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --success: #22c55e;
+      --error: #ef4444;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 420px;
+      width: 100%;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 32px;
+      text-align: center;
+    }
+
+    .logo {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+
+    h1 {
+      font-size: 24px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      color: var(--text-dim);
+      margin-bottom: 32px;
+    }
+
+    .action-info {
+      background: #1a1a2e;
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 24px;
+      text-align: left;
+    }
+
+    .action-info h3 {
+      font-size: 14px;
+      color: var(--text-dim);
+      margin-bottom: 8px;
+    }
+
+    .action-info .detail {
+      font-family: monospace;
+      font-size: 14px;
+      color: var(--text);
+      word-break: break-all;
+    }
+
+    .action-info .host {
+      color: var(--primary);
+      font-weight: 600;
+    }
+
+    .action-info .command {
+      background: #0d0d0d;
+      padding: 8px 12px;
+      border-radius: 6px;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      padding: 16px 24px;
+      font-size: 16px;
+      font-weight: 600;
+      border: none;
+      border-radius: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: var(--primary-hover);
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn-icon {
+      font-size: 20px;
+    }
+
+    .result {
+      margin-top: 24px;
+      padding: 16px;
+      border-radius: 12px;
+      display: none;
+    }
+
+    .result.success {
+      display: block;
+      background: rgba(34, 197, 94, 0.1);
+      border: 1px solid var(--success);
+    }
+
+    .result.error {
+      display: block;
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid var(--error);
+    }
+
+    .unlock-code {
+      font-family: monospace;
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: var(--success);
+      margin: 12px 0;
+      padding: 12px;
+      background: rgba(34, 197, 94, 0.1);
+      border-radius: 8px;
+    }
+
+    .copy-hint {
+      font-size: 14px;
+      color: var(--text-dim);
+    }
+
+    .error-message {
+      color: var(--error);
+    }
+
+    .loading {
+      display: none;
+    }
+
+    .loading.active {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      color: var(--text-dim);
+      margin-top: 16px;
+    }
+
+    .spinner {
+      width: 20px;
+      height: 20px;
+      border: 2px solid var(--border);
+      border-top-color: var(--primary);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .footer {
+      margin-top: 24px;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="logo">🔐</div>
+      <h1 id="title">SSH Vault</h1>
+      <p class="subtitle" id="subtitle">Authenticate with your Passkey</p>
+
+      <div class="action-info" id="actionInfo" style="display: none;">
+        <h3>Action Requested</h3>
+        <div class="detail" id="actionDetail"></div>
+      </div>
+
+      <button class="btn btn-primary" id="authBtn" onclick="authenticate()">
+        <span class="btn-icon">👆</span>
+        Use Passkey
+      </button>
+
+      <div class="loading" id="loading">
+        <div class="spinner"></div>
+        <span>Verifying...</span>
+      </div>
+
+      <div class="result" id="result">
+        <div id="resultContent"></div>
+      </div>
+
+      <p class="footer">
+        SSH Vault MCP • Secure credential management
+      </p>
+    </div>
+  </div>
+
+  <script>
+    // Get challenge ID from URL
+    const params = new URLSearchParams(window.location.search);
+    const challengeId = params.get('challenge');
+    const isSetup = window.location.pathname === '/setup';
+
+    let challengeInfo = null;
+
+    // Initialize page
+    async function init() {
+      if (isSetup) {
+        document.getElementById('title').textContent = 'Setup SSH Vault';
+        document.getElementById('subtitle').textContent = 'Create your Passkey for vault access';
+        document.getElementById('authBtn').innerHTML = '<span class="btn-icon">➕</span> Create Passkey';
+        return;
+      }
+
+      if (!challengeId) {
+        showError('No challenge ID provided');
+        return;
+      }
+
+      try {
+        const response = await fetch(`/api/challenge/${challengeId}`);
+        if (!response.ok) {
+          throw new Error('Challenge not found or expired');
+        }
+
+        challengeInfo = await response.json();
+        displayChallengeInfo(challengeInfo);
+      } catch (error) {
+        showError(error.message);
+      }
+    }
+
+    function displayChallengeInfo(info) {
+      const actionInfo = document.getElementById('actionInfo');
+      const actionDetail = document.getElementById('actionDetail');
+
+      if (info.action === 'unlock_vault') {
+        document.getElementById('subtitle').textContent = 'Unlock your SSH Vault';
+        actionInfo.style.display = 'none';
+      } else if (info.action === 'approve_command') {
+        document.getElementById('title').textContent = 'Approve Command';
+        document.getElementById('subtitle').textContent = 'An agent is requesting permission';
+        
+        let html = `<div class="host">Host: ${info.host}</div>`;
+        if (info.commands && info.commands.length > 0) {
+          html += '<div class="command">' + info.commands.join('<br>') + '</div>';
+        }
+        if (info.agent) {
+          html += `<div style="margin-top: 8px; font-size: 12px;">Agent: ${info.agent}</div>`;
+        }
+        
+        actionDetail.innerHTML = html;
+        actionInfo.style.display = 'block';
+      }
+    }
+
+    async function authenticate() {
+      const btn = document.getElementById('authBtn');
+      const loading = document.getElementById('loading');
+
+      btn.disabled = true;
+      loading.classList.add('active');
+
+      try {
+        if (isSetup) {
+          await register();
+        } else {
+          await verify();
+        }
+      } catch (error) {
+        showError(error.message);
+      } finally {
+        btn.disabled = false;
+        loading.classList.remove('active');
+      }
+    }
+
+    async function register() {
+      // Get registration options
+      const optionsRes = await fetch('/api/register/options', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: crypto.randomUUID(),
+          userName: 'Vault Owner',
+        }),
+      });
+
+      if (!optionsRes.ok) {
+        throw new Error('Failed to get registration options');
+      }
+
+      const { options, challengeId: regChallengeId } = await optionsRes.json();
+
+      // Create credential
+      const credential = await navigator.credentials.create({
+        publicKey: {
+          ...options,
+          challenge: base64ToBuffer(options.challenge),
+          user: {
+            ...options.user,
+            id: base64ToBuffer(options.user.id),
+          },
+        },
+      });
+
+      // Verify registration
+      const verifyRes = await fetch('/api/register/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          challengeId: regChallengeId,
+          response: {
+            id: credential.id,
+            rawId: bufferToBase64(credential.rawId),
+            type: credential.type,
+            response: {
+              clientDataJSON: bufferToBase64(credential.response.clientDataJSON),
+              attestationObject: bufferToBase64(credential.response.attestationObject),
+            },
+          },
+        }),
+      });
+
+      const result = await verifyRes.json();
+
+      if (!result.success) {
+        throw new Error(result.error || 'Registration failed');
+      }
+
+      showSuccess('Vault created! You can now close this page.');
+    }
+
+    async function verify() {
+      // Get authentication options
+      const optionsRes = await fetch('/api/auth/options', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      if (!optionsRes.ok) {
+        const error = await optionsRes.json();
+        throw new Error(error.error || 'Failed to get authentication options');
+      }
+
+      const { options, challengeId: webauthnChallengeId } = await optionsRes.json();
+
+      // Get credential
+      const credential = await navigator.credentials.get({
+        publicKey: {
+          ...options,
+          challenge: base64ToBuffer(options.challenge),
+          allowCredentials: options.allowCredentials?.map(c => ({
+            ...c,
+            id: base64ToBuffer(c.id),
+          })),
+        },
+      });
+
+      // Verify authentication
+      const verifyRes = await fetch('/api/auth/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          webauthnChallengeId,
+          vaultChallengeId: challengeId,
+          response: {
+            id: credential.id,
+            rawId: bufferToBase64(credential.rawId),
+            type: credential.type,
+            response: {
+              clientDataJSON: bufferToBase64(credential.response.clientDataJSON),
+              authenticatorData: bufferToBase64(credential.response.authenticatorData),
+              signature: bufferToBase64(credential.response.signature),
+              userHandle: credential.response.userHandle 
+                ? bufferToBase64(credential.response.userHandle) 
+                : null,
+            },
+          },
+        }),
+      });
+
+      const result = await verifyRes.json();
+
+      if (!result.success) {
+        throw new Error(result.error || 'Authentication failed');
+      }
+
+      showUnlockCode(result.unlockCode);
+    }
+
+    function showUnlockCode(code) {
+      const result = document.getElementById('result');
+      const content = document.getElementById('resultContent');
+
+      content.innerHTML = `
+        <div>✅ Authentication successful!</div>
+        <div class="unlock-code">${code}</div>
+        <div class="copy-hint">Copy this code and provide it to the agent</div>
+      `;
+
+      result.className = 'result success';
+
+      // Try to copy to clipboard
+      navigator.clipboard?.writeText(code);
+    }
+
+    function showSuccess(message) {
+      const result = document.getElementById('result');
+      const content = document.getElementById('resultContent');
+
+      content.innerHTML = `<div>✅ ${message}</div>`;
+      result.className = 'result success';
+    }
+
+    function showError(message) {
+      const result = document.getElementById('result');
+      const content = document.getElementById('resultContent');
+
+      content.innerHTML = `<div class="error-message">❌ ${message}</div>`;
+      result.className = 'result error';
+
+      document.getElementById('authBtn').disabled = true;
+    }
+
+    // Utility functions
+    function base64ToBuffer(base64) {
+      const binary = atob(base64.replace(/-/g, '+').replace(/_/g, '/'));
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return bytes.buffer;
+    }
+
+    function bufferToBase64(buffer) {
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    }
+
+    // Initialize on load
+    init();
+  </script>
+</body>
+</html>
