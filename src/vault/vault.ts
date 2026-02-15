@@ -29,6 +29,7 @@ export class VaultManager {
   private vault: Vault | null = null;
   private sessions: Map<string, Session> = new Map();
   private pendingChallenges: Map<string, PendingChallenge> = new Map();
+  private completedChallenges: Map<string, { status: string; sessionId?: string; error?: string; completedAt: number }> = new Map();
   private sessionTimeoutMs: number;
   private challengeTimeoutMs: number = 5 * 60 * 1000; // 5 minutes
   private currentSignature: Uint8Array | null = null;
@@ -349,7 +350,8 @@ export class VaultManager {
           sessionId: session.id,
         });
         
-        // Cleanup
+        // Save result for polling and cleanup
+        this.saveChallengeResult(foundId, { status: 'approved', sessionId: session.id });
         this.pendingChallenges.delete(foundId);
         this.challengeListeners.delete(foundId);
         
@@ -434,7 +436,8 @@ export class VaultManager {
           sessionId: session.id,
         });
         
-        // Cleanup
+        // Save result for polling and cleanup
+        this.saveChallengeResult(foundId, { status: 'approved', sessionId: session.id });
         this.pendingChallenges.delete(foundId);
         this.challengeListeners.delete(foundId);
         
@@ -702,5 +705,37 @@ export class VaultManager {
   hasListeners(challengeId: string): boolean {
     const listeners = this.challengeListeners.get(challengeId);
     return listeners !== undefined && listeners.size > 0;
+  }
+
+  /**
+   * Save completed challenge result for polling
+   */
+  saveChallengeResult(challengeId: string, result: { status: string; sessionId?: string; error?: string }): void {
+    this.completedChallenges.set(challengeId, {
+      ...result,
+      completedAt: Date.now(),
+    });
+    // Auto-cleanup after 10 minutes
+    setTimeout(() => this.completedChallenges.delete(challengeId), 10 * 60 * 1000);
+  }
+
+  /**
+   * Get challenge status (pending, approved, denied, expired)
+   */
+  getChallengeStatus(challengeId: string): { status: string; sessionId?: string; error?: string } {
+    // Check completed first
+    const completed = this.completedChallenges.get(challengeId);
+    if (completed) {
+      return { status: completed.status, sessionId: completed.sessionId, error: completed.error };
+    }
+    // Check pending
+    const pending = this.pendingChallenges.get(challengeId);
+    if (pending) {
+      if (pending.challenge.expiresAt < Date.now()) {
+        return { status: 'expired' };
+      }
+      return { status: 'pending' };
+    }
+    return { status: 'not_found' };
   }
 }

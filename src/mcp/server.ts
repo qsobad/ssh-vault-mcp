@@ -190,6 +190,20 @@ const TOOLS: Tool[] = [
       required: ['name', 'publicKey', 'requestedHosts'],
     },
   },
+  {
+    name: 'check_request',
+    description: 'Poll the status of an access request or unlock challenge. Returns: pending, approved, denied, expired, or not_found.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        challengeId: {
+          type: 'string',
+          description: 'The challenge ID returned by request_access or request_unlock',
+        },
+      },
+      required: ['challengeId'],
+    },
+  },
 ];
 
 export class MCPServer {
@@ -262,6 +276,9 @@ export class MCPServer {
         if (name === 'request_access') {
           return this.handleRequestAccess(typedArgs);
         }
+        if (name === 'check_request') {
+          return this.handleCheckRequest(typedArgs);
+        }
 
         // All other tools require signature verification
         const fingerprint = this.verifyAgentSignature(typedArgs);
@@ -311,6 +328,21 @@ export class MCPServer {
         };
       }
     });
+  }
+
+  private handleCheckRequest(args: Record<string, unknown>) {
+    const challengeId = args.challengeId as string;
+    if (!challengeId) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ error: 'challengeId required' }, null, 2) }],
+        isError: true,
+      };
+    }
+
+    const result = this.vaultManager.getChallengeStatus(challengeId);
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+    };
   }
 
   private handleRequestAccess(args: Record<string, unknown>) {

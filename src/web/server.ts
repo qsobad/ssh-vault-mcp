@@ -213,6 +213,12 @@ export class WebServer {
       });
     });
 
+    // Challenge status polling endpoint
+    this.app.get('/api/challenge/:id/status', (req: Request, res: Response) => {
+      const result = this.vaultManager.getChallengeStatus(req.params.id);
+      res.json(result);
+    });
+
     // Registration endpoints (for initial setup)
     this.app.post('/api/register/options', async (req: Request, res: Response) => {
       try {
