@@ -29,22 +29,25 @@ A secure SSH credential vault with [MCP](https://modelcontextprotocol.io/) (Mode
 
 ## Quick Start
 
-### 1. Run with Docker
+### 1. Pull the image
+
+```bash
+docker pull qsobad/ssh-vault-mcp:latest
+```
+
+### 2. Run standalone (without Claude Desktop)
 
 ```bash
 docker run -d \
   --name ssh-vault \
   -p 3001:3001 \
   -v ssh-vault-data:/app/data \
-  -e VAULT_RPID=vault.example.com \
-  -e VAULT_ORIGIN=https://vault.example.com \
-  -e VAULT_EXTERNAL_URL=https://vault.example.com \
+  -v ./config.yml:/app/config.yml:ro \
+  -e SSH_VAULT_CONFIG=/app/config.yml \
   qsobad/ssh-vault-mcp:latest
 ```
 
-### 2. Or with Docker Compose
-
-Create `docker-compose.yml`:
+Or with Docker Compose:
 
 ```yaml
 services:
@@ -55,45 +58,18 @@ services:
     ports:
       - "3001:3001"
     volumes:
-      - ./data:/app/data
+      - ssh-vault-data:/app/data
       - ./config.yml:/app/config.yml:ro
     environment:
       - SSH_VAULT_CONFIG=/app/config.yml
-```
 
-Create `config.yml`:
-
-```yaml
-server:
-  port: 3000
-  host: 0.0.0.0
-
-vault:
-  path: ./data/vault.enc
-  backup: true
-
-webauthn:
-  rpId: vault.example.com
-  rpName: SSH Vault
-  origin: https://vault.example.com
-
-web:
-  port: 3001
-  externalUrl: https://vault.example.com
-
-session:
-  timeoutMinutes: 30
-
-autoLockMinutes: 15
-```
-
-```bash
-docker compose up -d
+volumes:
+  ssh-vault-data:
 ```
 
 ### 3. Setup Vault
 
-Visit `https://vault.example.com` → Set Master Password → Register Passkey → Add SSH hosts via **Manage** page.
+Visit `http://localhost:3001` → Set Master Password → Register Passkey → Add SSH hosts via **Manage** page.
 
 ## Claude Desktop MCP Configuration
 
@@ -102,26 +78,46 @@ Add to your Claude Desktop config:
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
-### Using Docker (recommended)
+### Docker (recommended)
 
-The MCP server runs inside Docker. Claude Desktop connects to the HTTP API:
+Claude Desktop launches the Docker container locally. MCP communicates via stdio, the web UI is exposed on port 3001:
 
 ```json
 {
   "mcpServers": {
     "ssh-vault": {
-      "command": "npx",
-      "args": ["-y", "@anthropic-ai/mcp-remote", "https://vault.example.com/mcp"]
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-p", "3001:3001",
+        "-v", "ssh-vault-data:/app/data",
+        "-v", "/path/to/config.yml:/app/config.yml:ro",
+        "-e", "SSH_VAULT_CONFIG=/app/config.yml",
+        "qsobad/ssh-vault-mcp:latest"
+      ]
     }
   }
 }
 ```
 
-> **Note**: Replace `vault.example.com` with your actual domain. The vault must be accessible over HTTPS.
+> **Note**: `-i` keeps stdin open for MCP stdio transport. `--rm` cleans up on exit. The vault data persists in the `ssh-vault-data` Docker volume.
 
-### Using stdio (local development)
+#### Minimal config.yml
 
-If running from source locally:
+```yaml
+webauthn:
+  rpId: localhost
+  rpName: SSH Vault
+  origin: http://localhost:3001
+
+web:
+  port: 3001
+  externalUrl: http://localhost:3001
+```
+
+Then visit `http://localhost:3001` to set up your vault (Master Password + Passkey).
+
+### From source (development)
 
 ```json
 {
@@ -141,15 +137,16 @@ If running from source locally:
 
 1. Restart Claude Desktop
 2. Look for the 🔌 icon — "ssh-vault" should appear in MCP servers
-3. Ask Claude: *"Check the SSH vault status"*
-4. Claude will use `vault_status`, `request_unlock`, `execute_command` etc.
+3. Visit `http://localhost:3001` to set up vault and add SSH hosts
+4. Ask Claude: *"Check the SSH vault status"*
+5. Claude will use `vault_status`, `request_unlock`, `execute_command` etc.
 
 ### Agent Keypair
 
-The agent needs an Ed25519 keypair to sign requests:
+The agent needs an Ed25519 keypair to sign requests. Generate one:
 
 ```bash
-node -e "
+docker run --rm qsobad/ssh-vault-mcp:latest node -e "
 const nacl = require('tweetnacl');
 const kp = nacl.sign.keyPair();
 const crypto = require('crypto');
@@ -162,7 +159,7 @@ console.log(JSON.stringify({
 "
 ```
 
-Store the keypair securely on the machine running Claude Desktop.
+Store the keypair securely. The agent uses it to sign all MCP requests.
 
 ## MCP Tools
 
