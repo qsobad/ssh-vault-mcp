@@ -14,7 +14,6 @@ import {
   decryptString,
   toBase64,
   fromBase64,
-  secureWipe,
 } from './encryption.js';
 
 export class VaultStorage {
@@ -112,8 +111,7 @@ export class VaultStorage {
       await fs.writeFile(tempPath, JSON.stringify(vaultFile, null, 2), { mode: 0o600 });
       await fs.rename(tempPath, this.vaultPath);
     } finally {
-      // Wipe encryption key from memory
-      secureWipe(vek);
+      // Don't wipe VEK here - caller manages its lifecycle
     }
   }
 
