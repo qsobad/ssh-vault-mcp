@@ -92,7 +92,7 @@ export class WebServer {
           host: challenge.host,
           commands: challenge.commands,
           agent: challenge.agent,
-          agentRegistration: challenge.agentRegistration,
+          accessRequest: challenge.accessRequest,
           expiresAt: challenge.expiresAt,
         },
       });
@@ -166,13 +166,18 @@ export class WebServer {
       }
     });
 
-    // Agent registration endpoint (REST API for MCP-less testing)
-    this.app.post('/api/agent/register', async (req: Request, res: Response) => {
+    // Agent request host access endpoint
+    this.app.post('/api/agent/request-access', async (req: Request, res: Response) => {
       try {
         const { name, publicKey, requestedHosts } = req.body;
         
         if (!name || !publicKey) {
           res.status(400).json({ error: 'name and publicKey required' });
+          return;
+        }
+
+        if (!requestedHosts || requestedHosts.length === 0) {
+          res.status(400).json({ error: 'requestedHosts required' });
           return;
         }
 
@@ -187,29 +192,14 @@ export class WebServer {
           return;
         }
 
-        // Check if agent already exists (only if vault is unlocked)
-        try {
-          const existingAgent = this.vaultManager.getAgent(fingerprint);
-          if (existingAgent) {
-            res.status(409).json({ 
-              error: 'Agent already registered',
-              fingerprint,
-              name: existingAgent.name,
-            });
-            return;
-          }
-        } catch {
-          // Vault is locked, can't check - proceed with registration
-        }
-
-        // Create registration challenge
-        const result = this.vaultManager.createAgentRegistrationChallenge(
+        // Create access request challenge (agent will be auto-enlisted if not exists)
+        const result = this.vaultManager.createAccessRequestChallenge(
           this.config.web.externalUrl,
           {
             name,
             fingerprint,
             publicKey,
-            requestedHosts: requestedHosts || ['*'],
+            requestedHosts,
           }
         );
 
@@ -220,11 +210,10 @@ export class WebServer {
           listenUrl: result.listenUrl,
           challengeId: result.challengeId,
           expiresAt: result.expiresAt,
-          note: 'Commands are controlled by global policy, not per-agent.',
         });
       } catch (error) {
         res.status(500).json({ 
-          error: error instanceof Error ? error.message : 'Registration failed' 
+          error: error instanceof Error ? error.message : 'Request failed' 
         });
       }
     });
@@ -615,9 +604,9 @@ export class WebServer {
       res.sendFile(path.join(__dirname, '../../web/manage.html'));
     });
 
-    // Agent registration approval UI
-    this.app.get('/register-agent', (_req: Request, res: Response) => {
-      res.sendFile(path.join(__dirname, '../../web/register-agent.html'));
+    // Agent access request approval UI
+    this.app.get('/request-access', (_req: Request, res: Response) => {
+      res.sendFile(path.join(__dirname, '../../web/request-access.html'));
     });
   }
 

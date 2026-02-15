@@ -65,7 +65,7 @@ export interface VaultFile {
 
 export interface UnlockChallenge {
   id: string;
-  action: "unlock_vault" | "approve_command" | "register_agent";
+  action: "unlock_vault" | "approve_command" | "request_access";
   timestamp: number;
   nonce: string;
   expiresAt: number;
@@ -75,8 +75,8 @@ export interface UnlockChallenge {
   host?: string;
   commands?: string[];
   
-  // For register_agent
-  agentRegistration?: {
+  // For request_access (agent requesting host access)
+  accessRequest?: {
     name: string;
     fingerprint: string;
     publicKey: string;

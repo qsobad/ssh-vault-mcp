@@ -177,8 +177,8 @@ const TOOLS: Tool[] = [
     },
   },
   {
-    name: 'register_agent',
-    description: 'Request to register a new agent. Returns a URL for user approval via Passkey. Does not require existing registration. Commands are controlled by global policy.',
+    name: 'request_access',
+    description: 'Request access to SSH hosts. Returns a URL for user approval via Passkey. Agent will be auto-enlisted if not already registered.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -196,7 +196,7 @@ const TOOLS: Tool[] = [
           description: 'Requested host patterns (e.g., ["dev-*", "staging-*"])',
         },
       },
-      required: ['name', 'publicKey'],
+      required: ['name', 'publicKey', 'requestedHosts'],
     },
   },
 ];
@@ -271,8 +271,8 @@ export class MCPServer {
         if (name === 'generate_keypair') {
           return this.handleGenerateKeypair();
         }
-        if (name === 'register_agent') {
-          return this.handleRegisterAgent(typedArgs);
+        if (name === 'request_access') {
+          return this.handleRequestAccess(typedArgs);
         }
 
         // All other tools require signature verification
@@ -342,10 +342,20 @@ export class MCPServer {
     };
   }
 
-  private handleRegisterAgent(args: Record<string, unknown>) {
+  private handleRequestAccess(args: Record<string, unknown>) {
     const name = args.name as string;
     const publicKey = args.publicKey as string;
-    const requestedHosts = (args.requestedHosts as string[]) || ['*'];
+    const requestedHosts = args.requestedHosts as string[];
+
+    if (!requestedHosts || requestedHosts.length === 0) {
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ error: 'requestedHosts is required' }, null, 2),
+        }],
+        isError: true,
+      };
+    }
 
     // Validate public key and compute fingerprint
     let fingerprint: string;
@@ -355,36 +365,14 @@ export class MCPServer {
       return {
         content: [{
           type: 'text',
-          text: JSON.stringify({
-            error: 'Invalid public key format',
-          }, null, 2),
+          text: JSON.stringify({ error: 'Invalid public key format' }, null, 2),
         }],
         isError: true,
       };
     }
 
-    // Check if agent already registered (only if vault is unlocked)
-    try {
-      const existingAgent = this.vaultManager.getAgent(fingerprint);
-      if (existingAgent) {
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              error: 'Agent already registered',
-              fingerprint,
-              name: existingAgent.name,
-            }, null, 2),
-          }],
-          isError: true,
-        };
-      }
-    } catch {
-      // Vault locked, proceed with registration
-    }
-
-    // Create registration challenge
-    const { approvalUrl, listenUrl, challengeId, expiresAt } = this.vaultManager.createAgentRegistrationChallenge(
+    // Create access request challenge
+    const { approvalUrl, listenUrl, challengeId, expiresAt } = this.vaultManager.createAccessRequestChallenge(
       this.config.web.externalUrl,
       {
         name,
@@ -404,7 +392,7 @@ export class MCPServer {
           listenUrl,
           challengeId,
           expiresAt,
-          message: 'Registration requires user approval. Commands are controlled by global policy.',
+          message: 'Access request requires user approval.',
         }, null, 2),
       }],
     };

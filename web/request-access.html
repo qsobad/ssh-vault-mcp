@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SSH Vault - Register Agent</title>
+  <title>SSH Vault - Access Request</title>
   <style>
     :root {
       --bg: #0a0a0a;
@@ -165,9 +165,9 @@
 <body>
   <div class="container">
     <div class="card">
-      <div class="logo">🤖</div>
-      <h1>Agent Registration</h1>
-      <p class="subtitle">An agent is requesting access to your vault</p>
+      <div class="logo">🔑</div>
+      <h1>Access Request</h1>
+      <p class="subtitle">An agent is requesting host access</p>
 
       <div id="loading">Loading challenge...</div>
 
@@ -219,11 +219,11 @@
         if (!res.ok) throw new Error('Challenge not found or expired');
         
         const data = await res.json();
-        if (data.challenge.action !== 'register_agent') {
+        if (data.challenge.action !== 'request_access') {
           throw new Error('Invalid challenge type');
         }
 
-        const reg = data.challenge.agentRegistration;
+        const reg = data.challenge.accessRequest;
         
         // Display agent info
         document.getElementById('agent-name').textContent = reg.name;
@@ -303,7 +303,7 @@
         
         const statusEl = document.getElementById('result-status');
         statusEl.className = 'status success';
-        statusEl.innerHTML = '✅ Agent registered successfully!<br><small>The agent will be notified automatically.</small>';
+        statusEl.innerHTML = '✅ Access granted!<br><small>The agent will be notified automatically.</small>';
         
         if (result.unlockCode) {
           document.getElementById('unlock-code').textContent = result.unlockCode;

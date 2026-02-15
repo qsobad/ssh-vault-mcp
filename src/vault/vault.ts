@@ -169,9 +169,10 @@ export class VaultManager {
   }
 
   /**
-   * Create an agent registration challenge (requires user approval)
+   * Create an access request challenge (agent requests host access)
+   * Agent will be auto-enlisted if not already in vault
    */
-  createAgentRegistrationChallenge(
+  createAccessRequestChallenge(
     baseUrl: string,
     agentInfo: {
       name: string;
@@ -187,11 +188,11 @@ export class VaultManager {
   } {
     const challenge: UnlockChallenge = {
       id: generateRandomId(),
-      action: 'register_agent',
+      action: 'request_access',
       timestamp: Date.now(),
       nonce: generateRandomId(),
       expiresAt: Date.now() + this.challengeTimeoutMs,
-      agentRegistration: agentInfo,
+      accessRequest: agentInfo,
     };
 
     const unlockCode = generateUnlockCode();
@@ -204,7 +205,7 @@ export class VaultManager {
 
     return {
       challengeId: challenge.id,
-      approvalUrl: `${baseUrl}/register-agent?challenge=${challenge.id}`,
+      approvalUrl: `${baseUrl}/request-access?challenge=${challenge.id}`,
       listenUrl: `${baseUrl}/api/challenge/${challenge.id}/listen`,
       expiresAt: challenge.expiresAt,
     };
@@ -222,15 +223,15 @@ export class VaultManager {
   }
 
   /**
-   * Update allowed hosts in a registration challenge (user can edit before approving)
+   * Update allowed hosts in an access request challenge (user can edit before approving)
    */
   updateChallengeHosts(challengeId: string, allowedHosts: string[]): boolean {
     const pending = this.pendingChallenges.get(challengeId);
     if (!pending || pending.challenge.expiresAt < Date.now()) {
       return false;
     }
-    if (pending.challenge.action === 'register_agent' && pending.challenge.agentRegistration) {
-      pending.challenge.agentRegistration.requestedHosts = allowedHosts;
+    if (pending.challenge.action === 'request_access' && pending.challenge.accessRequest) {
+      pending.challenge.accessRequest.requestedHosts = allowedHosts;
       return true;
     }
     return false;
@@ -255,11 +256,16 @@ export class VaultManager {
       return null;
     }
 
-    // Store signature
+    // Store signature (VEK)
     pending.signature = new Uint8Array(signature);
     
-    // Auto-unlock if there are listeners waiting
-    if (autoUnlock && this.hasListeners(challengeId)) {
+    // For access requests, always complete immediately (user just approved)
+    // For other challenges, only auto-complete if there are listeners
+    const shouldAutoComplete = 
+      pending.challenge.action === 'request_access' ||
+      (autoUnlock && this.hasListeners(challengeId));
+    
+    if (shouldAutoComplete) {
       const result = await this.submitUnlockCode(
         pending.unlockCode,
         pending.agentFingerprint
@@ -366,9 +372,9 @@ export class VaultManager {
           sessionId: session.id,
           expiresAt: session.expiresAt,
         };
-      } else if (foundChallenge.challenge.action === 'register_agent') {
-        // Register new agent
-        const reg = foundChallenge.challenge.agentRegistration!;
+      } else if (foundChallenge.challenge.action === 'request_access') {
+        // Agent requesting host access (auto-enlist if not exists)
+        const req = foundChallenge.challenge.accessRequest!;
         
         // Load vault with signature to modify it
         if (!this.vault) {
@@ -376,35 +382,39 @@ export class VaultManager {
           this.currentSignature = new Uint8Array(foundChallenge.signature);
         }
         
-        // Check if agent already exists
-        const existing = this.vault.agents.find(a => a.fingerprint === reg.fingerprint);
-        if (existing) {
-          return { success: false, error: 'Agent already registered' };
+        // Find or create agent
+        let agent = this.vault.agents.find(a => a.fingerprint === req.fingerprint);
+        if (!agent) {
+          // Auto-enlist new agent
+          agent = {
+            fingerprint: req.fingerprint,
+            name: req.name,
+            allowedHosts: [],
+            createdAt: Date.now(),
+            lastUsed: Date.now(),
+          };
+          this.vault.agents.push(agent);
         }
         
-        // Add new agent
-        const newAgent: AgentConfig = {
-          fingerprint: reg.fingerprint,
-          name: reg.name,
-          allowedHosts: reg.requestedHosts,
-          createdAt: Date.now(),
-          lastUsed: Date.now(),
-        };
-        
-        this.vault.agents.push(newAgent);
+        // Add requested hosts (merge with existing, avoid duplicates)
+        for (const host of req.requestedHosts) {
+          if (!agent.allowedHosts.includes(host)) {
+            agent.allowedHosts.push(host);
+          }
+        }
+        agent.lastUsed = Date.now();
         
         // Save vault
         await this.storage.save(this.vault, this.currentSignature!);
         
-        // Create session for the new agent
-        const session = this.createSession(reg.fingerprint);
+        // Create session for the agent
+        const session = this.createSession(req.fingerprint);
         
         // Emit event to listeners
         this.emitChallengeEvent(foundId, {
           type: 'approved',
           challengeId: foundId,
           sessionId: session.id,
-          agentRegistered: true,
         });
         
         // Cleanup
