@@ -350,22 +350,76 @@
           <input type="text" id="agentName" placeholder="coding-agent" required>
         </div>
         <div class="form-group">
-          <label>SSH Key Fingerprint</label>
+          <label>Public Key Fingerprint</label>
           <input type="text" id="agentFingerprint" placeholder="SHA256:..." required>
         </div>
         <div class="form-group">
           <label>Allowed Hosts (patterns, comma-separated)</label>
-          <input type="text" id="agentAllowedHosts" placeholder="dev-*, staging-*">
+          <input type="text" id="agentAllowedHosts" placeholder="*, dev-*, staging-*">
         </div>
-        <div class="form-group">
-          <label>Allowed Commands (comma-separated)</label>
-          <input type="text" id="agentAllowedCommands" placeholder="ls, cat, grep, tail">
-        </div>
-        <div class="form-group">
-          <label>Denied Commands (comma-separated)</label>
-          <input type="text" id="agentDeniedCommands" placeholder="rm, sudo, reboot">
-        </div>
+        <p style="font-size: 12px; color: var(--text-dim); margin-top: 8px;">Commands are controlled by global policy.</p>
         <button type="submit" class="btn btn-primary" style="width: 100%;">Add Agent</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Edit Host Modal -->
+  <div class="modal" id="editHostModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Edit Host</h2>
+        <button class="modal-close" onclick="closeModal('editHostModal')">&times;</button>
+      </div>
+      <form onsubmit="updateHost(event)">
+        <input type="hidden" id="editHostId">
+        <div class="form-group">
+          <label>Name</label>
+          <input type="text" id="editHostName" required>
+        </div>
+        <div class="form-group">
+          <label>Hostname / IP</label>
+          <input type="text" id="editHostHostname" required>
+        </div>
+        <div class="form-group">
+          <label>Port</label>
+          <input type="number" id="editHostPort" required>
+        </div>
+        <div class="form-group">
+          <label>Username</label>
+          <input type="text" id="editHostUsername" required>
+        </div>
+        <div class="form-group">
+          <label>Credential (leave empty to keep current)</label>
+          <textarea id="editHostCredential" rows="4" placeholder="Paste new SSH key or password to change"></textarea>
+        </div>
+        <div class="form-group">
+          <label>Tags (comma-separated)</label>
+          <input type="text" id="editHostTags">
+        </div>
+        <button type="submit" class="btn btn-primary" style="width: 100%;">Save Changes</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Edit Agent Modal -->
+  <div class="modal" id="editAgentModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Edit Agent</h2>
+        <button class="modal-close" onclick="closeModal('editAgentModal')">&times;</button>
+      </div>
+      <form onsubmit="updateAgent(event)">
+        <input type="hidden" id="editAgentFingerprint">
+        <div class="form-group">
+          <label>Name</label>
+          <input type="text" id="editAgentName" required>
+        </div>
+        <div class="form-group">
+          <label>Allowed Hosts (patterns, comma-separated)</label>
+          <input type="text" id="editAgentAllowedHosts" placeholder="*, dev-*, staging-*">
+        </div>
+        <p style="font-size: 12px; color: var(--text-dim); margin-top: 8px;">Commands are controlled by global policy.</p>
+        <button type="submit" class="btn btn-primary" style="width: 100%;">Save Changes</button>
       </form>
     </div>
   </div>
@@ -548,6 +602,7 @@
           <td>${h.username}</td>
           <td>${(h.tags || []).map(t => `<span class="tag">${t}</span>`).join('')}</td>
           <td>
+            <button class="btn btn-sm" onclick="editHost('${h.id}')">Edit</button>
             <button class="btn btn-danger btn-sm" onclick="deleteHost('${h.id}')">Delete</button>
           </td>
         </tr>
@@ -570,8 +625,9 @@
           <td><strong>${a.name}</strong></td>
           <td style="font-family: monospace; font-size: 12px;">${a.fingerprint.substring(0, 20)}...</td>
           <td>${(a.allowedHosts || []).join(', ')}</td>
-          <td>${(a.allowedCommands || []).slice(0, 3).join(', ')}${a.allowedCommands?.length > 3 ? '...' : ''}</td>
+          <td>Global Policy</td>
           <td>
+            <button class="btn btn-sm" onclick="editAgent('${a.fingerprint}')">Edit</button>
             <button class="btn btn-danger btn-sm" onclick="deleteAgent('${a.fingerprint}')">Delete</button>
           </td>
         </tr>
@@ -609,8 +665,9 @@
       document.getElementById(`${name}-tab`).style.display = 'block';
     }
 
-    function showAddHostModal() { document.getElementById('addHostModal').classList.add('active'); }
-    function showAddAgentModal() { document.getElementById('addAgentModal').classList.add('active'); }
+    function showModal(id) { document.getElementById(id).classList.add('active'); }
+    function showAddHostModal() { showModal('addHostModal'); }
+    function showAddAgentModal() { showModal('addAgentModal'); }
     function closeModal(id) { document.getElementById(id).classList.remove('active'); }
 
     async function addHost(e) {
@@ -646,8 +703,6 @@
         name: document.getElementById('agentName').value,
         fingerprint: document.getElementById('agentFingerprint').value,
         allowedHosts: document.getElementById('agentAllowedHosts').value.split(',').map(t => t.trim()).filter(Boolean),
-        allowedCommands: document.getElementById('agentAllowedCommands').value.split(',').map(t => t.trim()).filter(Boolean),
-        deniedCommands: document.getElementById('agentDeniedCommands').value.split(',').map(t => t.trim()).filter(Boolean)
       };
 
       const res = await fetch('/api/manage/agents', {
@@ -662,6 +717,82 @@
         loadVaultData();
       } else {
         alert('Failed to add agent');
+      }
+    }
+
+    function editHost(id) {
+      const host = vaultData.hosts.find(h => h.id === id);
+      if (!host) return;
+      document.getElementById('editHostId').value = host.id;
+      document.getElementById('editHostName').value = host.name;
+      document.getElementById('editHostHostname').value = host.hostname;
+      document.getElementById('editHostPort').value = host.port;
+      document.getElementById('editHostUsername').value = host.username;
+      document.getElementById('editHostCredential').value = ''; // Don't load credential
+      document.getElementById('editHostTags').value = (host.tags || []).join(', ');
+      showModal('editHostModal');
+    }
+
+    async function updateHost(e) {
+      e.preventDefault();
+      const id = document.getElementById('editHostId').value;
+      const credential = document.getElementById('editHostCredential').value.trim();
+      const data = {
+        name: document.getElementById('editHostName').value,
+        hostname: document.getElementById('editHostHostname').value,
+        port: parseInt(document.getElementById('editHostPort').value),
+        username: document.getElementById('editHostUsername').value,
+        tags: document.getElementById('editHostTags').value.split(',').map(t => t.trim()).filter(Boolean)
+      };
+      
+      // Only include credential if user entered a new one
+      if (credential) {
+        data.credential = credential;
+      }
+
+      const res = await fetch(`/api/manage/hosts/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
+        body: JSON.stringify(data)
+      });
+
+      if (res.ok) {
+        closeModal('editHostModal');
+        document.getElementById('editHostCredential').value = ''; // Clear credential field
+        loadVaultData();
+      } else {
+        alert('Failed to update host');
+      }
+    }
+
+    function editAgent(fingerprint) {
+      const agent = vaultData.agents.find(a => a.fingerprint === fingerprint);
+      if (!agent) return;
+      document.getElementById('editAgentFingerprint').value = agent.fingerprint;
+      document.getElementById('editAgentName').value = agent.name;
+      document.getElementById('editAgentAllowedHosts').value = (agent.allowedHosts || []).join(', ');
+      showModal('editAgentModal');
+    }
+
+    async function updateAgent(e) {
+      e.preventDefault();
+      const fingerprint = document.getElementById('editAgentFingerprint').value;
+      const data = {
+        name: document.getElementById('editAgentName').value,
+        allowedHosts: document.getElementById('editAgentAllowedHosts').value.split(',').map(t => t.trim()).filter(Boolean)
+      };
+
+      const res = await fetch(`/api/manage/agents/${encodeURIComponent(fingerprint)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
+        body: JSON.stringify(data)
+      });
+
+      if (res.ok) {
+        closeModal('editAgentModal');
+        loadVaultData();
+      } else {
+        alert('Failed to update agent');
       }
     }
 

@@ -139,9 +139,11 @@ export class WebServer {
         // For MVP, we use a fixed server secret + credential ID
         // In production, use HSM or secure key management
         const { deriveKeyFromSignature } = await import('../vault/encryption.js');
+        console.log('[register] credential.id:', result.credential.id);
         const serverSecret = new TextEncoder().encode('ssh-vault-server-secret-' + result.credential.id);
         const salt = new TextEncoder().encode('ssh-vault-static-salt');
         const vek = deriveKeyFromSignature(serverSecret, salt.slice(0, 16));
+        console.log('[register] VEK derived, length:', vek.length);
         
         // Create vault with the credential and VEK
         await this.vaultManager.createVault(result.credential, vek);
@@ -412,9 +414,11 @@ export class WebServer {
 
         // Derive VEK and create management session
         const { deriveKeyFromSignature } = await import('../vault/encryption.js');
+        console.log('[manage-auth] credentialId:', metadata.credentialId);
         const serverSecret = new TextEncoder().encode('ssh-vault-server-secret-' + metadata.credentialId);
         const salt = new TextEncoder().encode('ssh-vault-static-salt');
         const vek = deriveKeyFromSignature(serverSecret, salt.slice(0, 16));
+        console.log('[manage-auth] VEK derived, length:', vek.length);
 
         const token = crypto.randomUUID();
         manageSessions.set(token, {
@@ -466,7 +470,9 @@ export class WebServer {
       try {
         const { VaultStorage } = await import('../vault/storage.js');
         const storage = new VaultStorage(this.config.vault.path, true);
+        console.log('[add-host] Loading vault with VEK...');
         const vault = await storage.load(session.vek);
+        console.log('[add-host] Vault loaded, hosts:', vault.hosts.length);
 
         const newHost = {
           id: crypto.randomUUID(),
@@ -482,11 +488,53 @@ export class WebServer {
         };
 
         vault.hosts.push(newHost);
+        console.log('[add-host] Saving vault...');
         await storage.save(vault, session.vek);
+        console.log('[add-host] Saved successfully');
 
         res.json({ success: true, host: { ...newHost, credential: '***' } });
       } catch (error) {
-        res.status(500).json({ error: 'Failed to add host' });
+        console.error('[add-host] Error:', error);
+        res.status(500).json({ error: 'Failed to add host: ' + (error instanceof Error ? error.message : String(error)) });
+      }
+    });
+
+    // Update host
+    this.app.put('/api/manage/hosts/:id', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      try {
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, true);
+        const vault = await storage.load(session.vek);
+
+        const hostIndex = vault.hosts.findIndex(h => h.id === req.params.id);
+        if (hostIndex === -1) {
+          res.status(404).json({ error: 'Host not found' });
+          return;
+        }
+
+        // Update fields
+        const host = vault.hosts[hostIndex];
+        if (req.body.name) host.name = req.body.name;
+        if (req.body.hostname) host.hostname = req.body.hostname;
+        if (req.body.port) host.port = req.body.port;
+        if (req.body.username) host.username = req.body.username;
+        if (req.body.tags) host.tags = req.body.tags;
+        if (req.body.credential) host.credential = req.body.credential;
+        host.updatedAt = Date.now();
+
+        await storage.save(vault, session.vek);
+        res.json({ success: true, host: { ...host, credential: '***' } });
+      } catch (error) {
+        console.error('[update-host] Error:', error);
+        res.status(500).json({ error: 'Failed to update host' });
       }
     });
 
@@ -545,6 +593,41 @@ export class WebServer {
         res.json({ success: true, agent: newAgent });
       } catch (error) {
         res.status(500).json({ error: 'Failed to add agent' });
+      }
+    });
+
+    // Update agent
+    this.app.put('/api/manage/agents/:fingerprint', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      try {
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, true);
+        const vault = await storage.load(session.vek);
+
+        const agentIndex = vault.agents.findIndex(a => a.fingerprint === decodeURIComponent(req.params.fingerprint));
+        if (agentIndex === -1) {
+          res.status(404).json({ error: 'Agent not found' });
+          return;
+        }
+
+        // Update fields
+        const agent = vault.agents[agentIndex];
+        if (req.body.name) agent.name = req.body.name;
+        if (req.body.allowedHosts) agent.allowedHosts = req.body.allowedHosts;
+        agent.lastUsed = Date.now();
+
+        await storage.save(vault, session.vek);
+        res.json({ success: true, agent });
+      } catch (error) {
+        console.error('[update-agent] Error:', error);
+        res.status(500).json({ error: 'Failed to update agent' });
       }
     });
 
