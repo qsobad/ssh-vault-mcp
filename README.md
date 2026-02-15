@@ -29,15 +29,37 @@ A secure SSH credential vault with [MCP](https://modelcontextprotocol.io/) (Mode
 
 ## Quick Start
 
-### 1. Install
+### 1. Run with Docker
 
 ```bash
-git clone https://github.com/qsobad/ssh-vault-mcp.git
-cd ssh-vault-mcp
-npm install
+docker run -d \
+  --name ssh-vault \
+  -p 3001:3001 \
+  -v ssh-vault-data:/app/data \
+  -e VAULT_RPID=vault.example.com \
+  -e VAULT_ORIGIN=https://vault.example.com \
+  -e VAULT_EXTERNAL_URL=https://vault.example.com \
+  qsobad/ssh-vault-mcp:latest
 ```
 
-### 2. Configure
+### 2. Or with Docker Compose
+
+Create `docker-compose.yml`:
+
+```yaml
+services:
+  ssh-vault:
+    image: qsobad/ssh-vault-mcp:latest
+    container_name: ssh-vault
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./data:/app/data
+      - ./config.yml:/app/config.yml:ro
+    environment:
+      - SSH_VAULT_CONFIG=/app/config.yml
+```
 
 Create `config.yml`:
 
@@ -65,75 +87,51 @@ session:
 autoLockMinutes: 15
 ```
 
-### 3. Setup Vault
-
 ```bash
-npm start
+docker compose up -d
 ```
 
-Visit `https://vault.example.com` → Set Master Password → Register Passkey → Add SSH hosts.
+### 3. Setup Vault
 
-### 4. Add Hosts
-
-Go to **Manage** (`/manage`) → Passkey login → Add Host with:
-- Host ID, hostname, port, username
-- SSH credential (private key or password)
+Visit `https://vault.example.com` → Set Master Password → Register Passkey → Add SSH hosts via **Manage** page.
 
 ## Claude Desktop MCP Configuration
 
-Add to your Claude Desktop config file:
+Add to your Claude Desktop config:
 
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
-### Option A: Local (stdio transport)
+### Using Docker (recommended)
 
-Run the vault server locally and connect via stdio:
+The MCP server runs inside Docker. Claude Desktop connects to the HTTP API:
 
 ```json
 {
   "mcpServers": {
     "ssh-vault": {
       "command": "npx",
-      "args": ["tsx", "/path/to/ssh-vault-mcp/src/index.ts"],
-      "env": {
-        "SSH_VAULT_CONFIG": "/path/to/ssh-vault-mcp/config.yml"
-      }
+      "args": ["-y", "@anthropic-ai/mcp-remote", "https://vault.example.com/mcp"]
     }
   }
 }
 ```
 
-### Option B: Local with node
+> **Note**: Replace `vault.example.com` with your actual domain. The vault must be accessible over HTTPS.
+
+### Using stdio (local development)
+
+If running from source locally:
 
 ```json
 {
   "mcpServers": {
     "ssh-vault": {
       "command": "node",
-      "args": ["--loader", "tsx", "/path/to/ssh-vault-mcp/src/index.ts"],
+      "args": ["/path/to/ssh-vault-mcp/dist/index.js"],
       "env": {
-        "SSH_VAULT_CONFIG": "/path/to/ssh-vault-mcp/config.yml"
+        "SSH_VAULT_CONFIG": "/path/to/config.yml"
       }
-    }
-  }
-}
-```
-
-### Option C: Built version
-
-Build first, then point to the compiled output:
-
-```bash
-npm run build
-```
-
-```json
-{
-  "mcpServers": {
-    "ssh-vault": {
-      "command": "node",
-      "args": ["/path/to/ssh-vault-mcp/dist/index.js"]
     }
   }
 }
@@ -142,21 +140,20 @@ npm run build
 ### After Configuration
 
 1. Restart Claude Desktop
-2. Look for the 🔌 icon — "ssh-vault" should appear in the MCP servers list
+2. Look for the 🔌 icon — "ssh-vault" should appear in MCP servers
 3. Ask Claude: *"Check the SSH vault status"*
 4. Claude will use `vault_status`, `request_unlock`, `execute_command` etc.
 
-### Agent Keypair Setup
+### Agent Keypair
 
-The agent (Claude) needs an Ed25519 keypair to sign requests. On first use:
+The agent needs an Ed25519 keypair to sign requests:
 
 ```bash
-# Generate keypair (store securely on the machine running Claude Desktop)
 node -e "
 const nacl = require('tweetnacl');
 const kp = nacl.sign.keyPair();
 const crypto = require('crypto');
-const fp = 'SHA256:' + crypto.createHash('sha256').update(kp.publicKey).digest('base64').replace(/=+$/, '');
+const fp = 'SHA256:' + crypto.createHash('sha256').update(kp.publicKey).digest('base64').replace(/=+\$/, '');
 console.log(JSON.stringify({
   publicKey: Buffer.from(kp.publicKey).toString('base64'),
   privateKey: Buffer.from(kp.secretKey).toString('base64'),
@@ -165,69 +162,60 @@ console.log(JSON.stringify({
 "
 ```
 
-Save the output to a secure location. The agent will use this to sign all MCP requests.
+Store the keypair securely on the machine running Claude Desktop.
 
 ## MCP Tools
 
-| Tool | Description | Auth Required |
-|------|-------------|---------------|
-| `vault_status` | Check if vault is locked/unlocked | Yes |
-| `request_unlock` | Get URL for Passkey authentication | Yes |
-| `submit_unlock` | Submit unlock code from signing page | Yes |
-| `list_hosts` | List available SSH hosts | Yes |
-| `execute_command` | Run command on a host | Yes (+ session + policy) |
-| `manage_vault` | Add/remove hosts and agents | Yes |
-| `revoke_session` | End current session | Yes |
-| `request_access` | Request access to hosts | No (auto-enlists agent) |
+| Tool | Description | Auth |
+|------|-------------|------|
+| `vault_status` | Check lock status | Signed |
+| `request_unlock` | Get Passkey auth URL | Signed |
+| `submit_unlock` | Submit unlock code | Signed |
+| `list_hosts` | List SSH hosts | Signed |
+| `execute_command` | Run SSH command | Signed + Session + Policy |
+| `manage_vault` | Manage hosts/agents | Signed |
+| `revoke_session` | End session | Signed |
+| `request_access` | Request host access | No auth (auto-enlists) |
 
-## Security Model
+## Security
 
 ### Encryption
 - **At rest**: Argon2id(Master Password, salt) → VEK → XSalsa20-Poly1305
-- **Passkey**: Proves user identity (WebAuthn), does not derive encryption key
-- **Vault file**: `0600` permissions, encrypted with VEK
+- **Vault file**: `0600` permissions
+- **On-demand**: Credentials decrypted per command, wiped immediately
 
-### Runtime
-- **On-demand decryption**: Credentials decrypted per SSH command, `secureWipe()`d immediately after
-- **Auto-lock**: VEK wiped from memory after 15 min inactivity
-- **No plaintext in memory**: Vault object holds `[encrypted]` placeholders for credentials
-
-### Agent Auth
-- **Ed25519 signatures**: Every request signed with agent's private key
-- **30-second nonce window**: Timestamps older than 30s rejected (replay protection)
-- **Session-based**: Agent must request access → human approves → session issued
+### Runtime Protection
+- **Auto-lock**: VEK wiped after 15 min inactivity
+- **No plaintext in memory**: Credential placeholders only
+- **30s nonce window**: Replay protection
+- **Rate limiting**: 5 attempts/IP/5min on auth endpoints
 
 ### Policy Engine
-- **Command whitelist/blacklist**: Global + per-agent
-- **Dangerous patterns**: `rm -rf /`, `mkfs`, `dd if=`, fork bombs
-- **Shell injection**: Blocks `|`, `;`, `&&`, `||`, `>`, `<`, `` ` ``, `$()`
-- **Timeout limits**: 1-300 seconds, default 30
-
-### Rate Limiting
-- 5 attempts per IP per 5 minutes on all auth endpoints
-- Returns `429 Too Many Requests` on exceed
+- Command whitelist/blacklist (global + per-agent)
+- Dangerous pattern detection (`rm -rf /`, `mkfs`, `dd`, fork bombs)
+- Shell injection blocking (`|`, `;`, `&&`, `||`, `>`, `` ` ``, `$()`)
+- Timeout limits: 1-300s
 
 ## HTTP API
 
-All endpoints at `https://your-vault-domain/api/`:
-
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/vault/status` | Vault lock status |
-| POST | `/vault/execute` | Execute SSH command (signed) |
-| POST | `/vault/submit-unlock` | Submit unlock code |
-| POST | `/agent/request-access` | Agent requests host access |
-| GET | `/challenge/:id/listen` | SSE for approval notifications |
-| POST | `/auth/options` | Passkey auth options |
-| POST | `/auth/verify` | Passkey auth verify |
-| GET | `/manage/data` | List hosts/agents (authed) |
-| POST | `/manage/hosts` | Add host (authed) |
-| PUT | `/manage/hosts/:id` | Update host (authed) |
-| DELETE | `/manage/hosts/:id` | Remove host (authed) |
+| GET | `/api/vault/status` | Vault lock status |
+| POST | `/api/vault/execute` | Execute SSH command (signed) |
+| POST | `/api/vault/submit-unlock` | Submit unlock code |
+| POST | `/api/agent/request-access` | Request host access |
+| GET | `/api/challenge/:id/listen` | SSE approval notifications |
+| POST | `/api/auth/options` | Passkey auth options |
+| POST | `/api/auth/verify` | Passkey auth verify |
+| GET | `/api/manage/data` | List hosts/agents (authed) |
+| POST | `/api/manage/hosts` | Add host (authed) |
 
 ## Development
 
 ```bash
+git clone https://github.com/qsobad/ssh-vault-mcp.git
+cd ssh-vault-mcp
+npm install
 npx tsx src/index.ts     # Dev mode
 npx tsc --noEmit         # Type check
 npm run build            # Build

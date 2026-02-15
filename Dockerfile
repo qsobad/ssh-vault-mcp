@@ -1,42 +1,18 @@
-FROM node:20-alpine AS builder
-
+FROM node:22-slim AS builder
 WORKDIR /app
-
-# Install dependencies
-COPY package*.json ./
+COPY package.json package-lock.json ./
 RUN npm ci
-
-# Copy source and build
 COPY tsconfig.json ./
-COPY src ./src
-COPY web ./web
+COPY src/ src/
+RUN npx tsc
 
-RUN npm run build
-
-# Production image
-FROM node:20-alpine
-
+FROM node:22-slim
 WORKDIR /app
-
-# Copy built files
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/web ./web
-COPY --from=builder /app/node_modules ./node_modules
-COPY package*.json ./
-
-# Create data directory
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+COPY --from=builder /app/dist/ dist/
+COPY web/ web/
 RUN mkdir -p /app/data
-
-# Set environment
-ENV NODE_ENV=production
-ENV SSH_VAULT_CONFIG=/app/config.yml
-
-# Expose ports
-EXPOSE 3000 3001
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:3001/health || exit 1
-
-# Run
+VOLUME /app/data
+EXPOSE 3001
 CMD ["node", "dist/index.js"]
