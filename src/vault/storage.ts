@@ -176,6 +176,26 @@ export class VaultStorage {
   }
 
   /**
+   * Decrypt a single host's credential from the vault file on-demand
+   */
+  async decryptHostCredential(hostId: string, vek: Uint8Array): Promise<string | null> {
+    await initSodium();
+
+    const fileContent = await fs.readFile(this.vaultPath, 'utf-8');
+    const vaultFile: VaultFile = JSON.parse(fileContent);
+    const nonce = fromBase64(vaultFile.nonce);
+
+    try {
+      const vaultJson = decryptString(vaultFile.data, vek, nonce);
+      const vault = JSON.parse(vaultJson) as Vault;
+      const host = vault.hosts.find(h => h.id === hostId || h.name === hostId);
+      return host?.credential ?? null;
+    } catch {
+      throw new Error('Failed to decrypt vault: invalid password or corrupted data');
+    }
+  }
+
+  /**
    * Get vault metadata without decrypting
    */
   async getMetadata(): Promise<{

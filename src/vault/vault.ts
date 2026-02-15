@@ -34,6 +34,10 @@ export class VaultManager {
   private challengeTimeoutMs: number = 5 * 60 * 1000; // 5 minutes
   private currentSignature: Uint8Array | null = null;
   
+  // Auto-lock timer
+  private autoLockTimer: ReturnType<typeof setTimeout> | null = null;
+  private autoLockMs: number;
+  
   // SSE event listeners per challenge
   private challengeListeners: Map<string, Set<ChallengeEventListener>> = new Map();
 
@@ -42,10 +46,12 @@ export class VaultManager {
     options: {
       sessionTimeoutMinutes?: number;
       backupEnabled?: boolean;
+      autoLockMinutes?: number;
     } = {}
   ) {
     this.storage = new VaultStorage(vaultPath, options.backupEnabled ?? true);
     this.sessionTimeoutMs = (options.sessionTimeoutMinutes ?? 30) * 60 * 1000;
+    this.autoLockMs = (options.autoLockMinutes ?? 15) * 60 * 1000;
   }
 
   /**
@@ -53,6 +59,48 @@ export class VaultManager {
    */
   async init(): Promise<void> {
     await initSodium();
+  }
+
+  /**
+   * Reset the auto-lock timer. Call on every vault operation.
+   */
+  resetAutoLockTimer(): void {
+    if (this.autoLockTimer) {
+      clearTimeout(this.autoLockTimer);
+      this.autoLockTimer = null;
+    }
+    if (this.currentSignature) {
+      this.autoLockTimer = setTimeout(() => {
+        console.error('[vault] Auto-lock triggered after inactivity');
+        this.lock();
+      }, this.autoLockMs);
+    }
+  }
+
+  /**
+   * Strip plaintext credentials from in-memory vault, replacing with placeholder
+   */
+  private stripCredentials(vault: Vault): Vault {
+    return {
+      ...vault,
+      hosts: vault.hosts.map(h => ({ ...h, credential: '[encrypted]' })),
+    };
+  }
+
+  /**
+   * Decrypt a single host's credential on-demand from the vault file.
+   * Caller MUST secureWipe the returned buffer after use.
+   */
+  async decryptHostCredential(hostNameOrId: string): Promise<string> {
+    if (!this.currentSignature) {
+      throw new Error('Vault is locked');
+    }
+    this.resetAutoLockTimer();
+    const credential = await this.storage.decryptHostCredential(hostNameOrId, this.currentSignature);
+    if (credential === null) {
+      throw new Error(`Host '${hostNameOrId}' not found`);
+    }
+    return credential;
   }
 
   /**
@@ -66,15 +114,17 @@ export class VaultManager {
    * Check if vault is currently unlocked
    */
   isUnlocked(): boolean {
-    return this.vault !== null;
+    return this.vault !== null && this.currentSignature !== null;
   }
 
   /**
-   * Reload vault from storage (refresh in-memory data)
+   * Reload vault from storage (refresh in-memory data, credentials stripped)
    */
   async reloadVault(): Promise<void> {
     if (this.currentSignature) {
-      this.vault = await this.storage.load(this.currentSignature);
+      const fullVault = await this.storage.load(this.currentSignature);
+      this.vault = this.stripCredentials(fullVault);
+      this.resetAutoLockTimer();
     }
   }
 
@@ -101,11 +151,13 @@ export class VaultManager {
     vek: Uint8Array,
     passwordSalt?: string
   ): Promise<void> {
-    this.vault = await this.storage.create(credential, vek);
+    const fullVault = await this.storage.create(credential, vek);
     if (passwordSalt) {
-      await this.storage.saveWithPasswordSalt(this.vault, vek, passwordSalt);
+      await this.storage.saveWithPasswordSalt(fullVault, vek, passwordSalt);
     }
+    this.vault = this.stripCredentials(fullVault);
     this.currentSignature = new Uint8Array(vek);
+    this.resetAutoLockTimer();
   }
 
   /**
@@ -336,9 +388,11 @@ export class VaultManager {
 
     try {
       if (foundChallenge.challenge.action === 'unlock_vault') {
-        // Unlock vault
-        this.vault = await this.storage.load(foundChallenge.signature);
+        // Unlock vault (strip credentials from memory)
+        const fullVault = await this.storage.load(foundChallenge.signature);
+        this.vault = this.stripCredentials(fullVault);
         this.currentSignature = new Uint8Array(foundChallenge.signature);
+        this.resetAutoLockTimer();
         
         // Create session
         const session = this.createSession(agentFingerprint);
@@ -396,13 +450,15 @@ export class VaultManager {
         const req = foundChallenge.challenge.accessRequest!;
         
         // Load vault with signature to modify it
-        if (!this.vault) {
-          this.vault = await this.storage.load(foundChallenge.signature);
+        if (!this.currentSignature) {
           this.currentSignature = new Uint8Array(foundChallenge.signature);
+          this.resetAutoLockTimer();
         }
+        // Load full vault for modification (will strip after save)
+        const fullVaultForAccess = await this.storage.load(this.currentSignature);
         
         // Find or create agent
-        let agent = this.vault.agents.find(a => a.fingerprint === req.fingerprint);
+        let agent = fullVaultForAccess.agents.find(a => a.fingerprint === req.fingerprint);
         if (!agent) {
           // Auto-enlist new agent
           agent = {
@@ -412,7 +468,7 @@ export class VaultManager {
             createdAt: Date.now(),
             lastUsed: Date.now(),
           };
-          this.vault.agents.push(agent);
+          fullVaultForAccess.agents.push(agent);
         }
         
         // Add requested hosts (merge with existing, avoid duplicates)
@@ -423,8 +479,9 @@ export class VaultManager {
         }
         agent.lastUsed = Date.now();
         
-        // Save vault
-        await this.storage.save(this.vault, this.currentSignature!);
+        // Save vault and update in-memory (stripped)
+        await this.storage.save(fullVaultForAccess, this.currentSignature!);
+        this.vault = this.stripCredentials(fullVaultForAccess);
         
         // Create session for the agent
         const session = this.createSession(req.fingerprint);
@@ -509,6 +566,10 @@ export class VaultManager {
    * Lock vault (clear from memory)
    */
   lock(): void {
+    if (this.autoLockTimer) {
+      clearTimeout(this.autoLockTimer);
+      this.autoLockTimer = null;
+    }
     if (this.currentSignature) {
       secureWipe(this.currentSignature);
       this.currentSignature = null;
@@ -541,10 +602,12 @@ export class VaultManager {
    * Add a host
    */
   async addHost(host: Omit<Host, 'id' | 'createdAt' | 'updatedAt'>): Promise<Host> {
-    if (!this.vault || !this.currentSignature) {
+    if (!this.currentSignature) {
       throw new Error('Vault is locked');
     }
+    this.resetAutoLockTimer();
 
+    const fullVault = await this.storage.load(this.currentSignature);
     const newHost: Host = {
       ...host,
       id: randomUUID(),
@@ -552,26 +615,30 @@ export class VaultManager {
       updatedAt: Date.now(),
     };
 
-    this.vault.hosts.push(newHost);
-    await this.storage.save(this.vault, this.currentSignature);
-    return newHost;
+    fullVault.hosts.push(newHost);
+    await this.storage.save(fullVault, this.currentSignature);
+    this.vault = this.stripCredentials(fullVault);
+    return { ...newHost, credential: '[encrypted]' };
   }
 
   /**
    * Remove a host
    */
   async removeHost(hostId: string): Promise<boolean> {
-    if (!this.vault || !this.currentSignature) {
+    if (!this.currentSignature) {
       throw new Error('Vault is locked');
     }
+    this.resetAutoLockTimer();
 
-    const index = this.vault.hosts.findIndex(h => h.id === hostId);
+    const fullVault = await this.storage.load(this.currentSignature);
+    const index = fullVault.hosts.findIndex(h => h.id === hostId);
     if (index === -1) {
       return false;
     }
 
-    this.vault.hosts.splice(index, 1);
-    await this.storage.save(this.vault, this.currentSignature);
+    fullVault.hosts.splice(index, 1);
+    await this.storage.save(fullVault, this.currentSignature);
+    this.vault = this.stripCredentials(fullVault);
     return true;
   }
 
@@ -599,18 +666,21 @@ export class VaultManager {
    * Add an agent
    */
   async addAgent(agent: Omit<AgentConfig, 'createdAt' | 'lastUsed'>): Promise<AgentConfig> {
-    if (!this.vault || !this.currentSignature) {
+    if (!this.currentSignature) {
       throw new Error('Vault is locked');
     }
+    this.resetAutoLockTimer();
 
+    const fullVault = await this.storage.load(this.currentSignature);
     const newAgent: AgentConfig = {
       ...agent,
       createdAt: Date.now(),
       lastUsed: Date.now(),
     };
 
-    this.vault.agents.push(newAgent);
-    await this.storage.save(this.vault, this.currentSignature);
+    fullVault.agents.push(newAgent);
+    await this.storage.save(fullVault, this.currentSignature);
+    this.vault = this.stripCredentials(fullVault);
     return newAgent;
   }
 
@@ -618,17 +688,20 @@ export class VaultManager {
    * Remove an agent
    */
   async removeAgent(fingerprint: string): Promise<boolean> {
-    if (!this.vault || !this.currentSignature) {
+    if (!this.currentSignature) {
       throw new Error('Vault is locked');
     }
+    this.resetAutoLockTimer();
 
-    const index = this.vault.agents.findIndex(a => a.fingerprint === fingerprint);
+    const fullVault = await this.storage.load(this.currentSignature);
+    const index = fullVault.agents.findIndex(a => a.fingerprint === fingerprint);
     if (index === -1) {
       return false;
     }
 
-    this.vault.agents.splice(index, 1);
-    await this.storage.save(this.vault, this.currentSignature);
+    fullVault.agents.splice(index, 1);
+    await this.storage.save(fullVault, this.currentSignature);
+    this.vault = this.stripCredentials(fullVault);
     return true;
   }
 

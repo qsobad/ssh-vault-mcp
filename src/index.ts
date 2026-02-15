@@ -36,6 +36,7 @@ async function main() {
   const vaultManager = new VaultManager(config.vault.path, {
     sessionTimeoutMinutes: config.session.timeoutMinutes,
     backupEnabled: config.vault.backup,
+    autoLockMinutes: config.autoLockMinutes,
   });
   await vaultManager.init();
 

@@ -107,6 +107,7 @@ export interface Config {
     mode: "single" | "session" | "time_window";
     timeoutMinutes: number;
   };
+  autoLockMinutes?: number;
   logging: {
     level: string;
     file?: string;

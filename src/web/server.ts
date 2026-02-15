@@ -119,13 +119,23 @@ export class WebServer {
       }
 
       try {
-        // Reload vault to get latest config
+        // Reload vault to get latest config (credentials stripped)
         await this.vaultManager.reloadVault();
         
-        // Get host config from vault
+        // Get host config from vault (credential will be '[encrypted]')
         const hostConfig = this.vaultManager.getHost(host);
         if (!hostConfig) {
           res.status(404).json({ error: `Host '${host}' not found` });
+          return;
+        }
+
+        // Decrypt credential on-demand
+        const { secureWipe: wipe } = await import('../vault/encryption.js');
+        let credential: string;
+        try {
+          credential = await this.vaultManager.decryptHostCredential(host);
+        } catch (err) {
+          res.status(500).json({ error: 'Failed to decrypt credential: ' + (err instanceof Error ? err.message : String(err)) });
           return;
         }
 
@@ -133,58 +143,65 @@ export class WebServer {
         const { Client } = await import('ssh2');
         const ssh = new Client();
 
-        const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolve, reject) => {
-          ssh.on('ready', () => {
-            ssh.exec(command, (err, stream) => {
-              if (err) {
-                ssh.end();
-                reject(err);
-                return;
-              }
+        try {
+          const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolve, reject) => {
+            ssh.on('ready', () => {
+              ssh.exec(command, (err, stream) => {
+                if (err) {
+                  ssh.end();
+                  reject(err);
+                  return;
+                }
 
-              let stdout = '';
-              let stderr = '';
+                let stdout = '';
+                let stderr = '';
 
-              stream.on('data', (data: Buffer) => { stdout += data.toString(); });
-              stream.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
-              stream.on('close', (code: number) => {
-                ssh.end();
-                resolve({ stdout, stderr, code });
+                stream.on('data', (data: Buffer) => { stdout += data.toString(); });
+                stream.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
+                stream.on('close', (code: number) => {
+                  ssh.end();
+                  resolve({ stdout, stderr, code });
+                });
               });
             });
+
+            ssh.on('error', reject);
+
+            const connectConfig: any = {
+              host: hostConfig.hostname,
+              port: hostConfig.port || 22,
+              username: hostConfig.username,
+            };
+
+            console.log('[execute] authType:', hostConfig.authType);
+            if (hostConfig.authType === 'key' || credential.includes('PRIVATE KEY')) {
+              connectConfig.privateKey = credential;
+              console.log('[execute] Using SSH key auth');
+            } else if (credential) {
+              connectConfig.password = credential;
+              console.log('[execute] Using password auth');
+            } else {
+              console.log('[execute] No credential configured!');
+            }
+
+            console.log('[execute] Connecting to:', connectConfig.host, connectConfig.port, connectConfig.username);
+            ssh.connect(connectConfig);
           });
 
-          ssh.on('error', reject);
-
-          const connectConfig: any = {
-            host: hostConfig.hostname,
-            port: hostConfig.port || 22,
-            username: hostConfig.username,
-          };
-
-          console.log('[execute] authType:', hostConfig.authType, 'credential length:', hostConfig.credential?.length || 0);
-          if (hostConfig.authType === 'key' || hostConfig.credential?.includes('PRIVATE KEY')) {
-            connectConfig.privateKey = hostConfig.credential;
-            console.log('[execute] Using SSH key auth');
-          } else if (hostConfig.credential) {
-            connectConfig.password = hostConfig.credential;
-            console.log('[execute] Using password auth');
-          } else {
-            console.log('[execute] No credential configured!');
-          }
-
-          console.log('[execute] Connecting to:', connectConfig.host, connectConfig.port, connectConfig.username);
-          ssh.connect(connectConfig);
-        });
-
-        res.json({
-          success: true,
-          host,
-          command,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.code,
-        });
+          res.json({
+            success: true,
+            host,
+            command,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exitCode: result.code,
+          });
+        } finally {
+          // Securely wipe credential from memory
+          const credBuf = Buffer.from(credential);
+          const credArr = new Uint8Array(credBuf.buffer, credBuf.byteOffset, credBuf.byteLength);
+          wipe(credArr);
+        }
       } catch (error) {
         console.error('[execute] Error:', error);
         res.status(500).json({ 
