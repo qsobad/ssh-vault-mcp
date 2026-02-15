@@ -17,10 +17,6 @@ import { PolicyEngine } from '../policy/engine.js';
 import { SSHExecutor } from '../ssh/executor.js';
 
 // Tool input schemas
-const VaultStatusSchema = z.object({});
-
-const RequestUnlockSchema = z.object({});
-
 const SubmitUnlockSchema = z.object({
   unlock_code: z.string().describe('Unlock code from the signing page'),
 });
@@ -39,8 +35,6 @@ const ManageVaultSchema = z.object({
   action: z.enum(['add_host', 'remove_host', 'update_host', 'add_agent', 'remove_agent']),
   data: z.record(z.unknown()).describe('Action-specific data'),
 });
-
-const RevokeSessionSchema = z.object({});
 
 // Tool definitions
 const TOOLS: Tool[] = [
@@ -450,9 +444,9 @@ export class MCPServer {
     }
   }
 
-  private handleManageVault(action: string, data: Record<string, unknown>) {
+  private handleManageVault(action: string, _data: Record<string, unknown>) {
     // All vault management requires Passkey approval
-    const { approvalUrl, challengeId, expiresAt } = this.vaultManager.createApprovalChallenge(
+    const { approvalUrl, listenUrl, challengeId, expiresAt } = this.vaultManager.createApprovalChallenge(
       this.config.web.externalUrl,
       this.agentFingerprint,
       '*',
@@ -466,6 +460,7 @@ export class MCPServer {
           needsApproval: true,
           action,
           approvalUrl,
+          listenUrl,
           challengeId,
           expiresAt,
           message: 'Vault management requires Passkey approval.',

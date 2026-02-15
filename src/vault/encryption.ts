@@ -1,31 +1,47 @@
 /**
- * Encryption module using libsodium
- * Implements Termius-style encryption (Argon2id + XSalsa20-Poly1305)
+ * Encryption module using tweetnacl + @noble/hashes
+ * Implements encryption (XSalsa20-Poly1305) with Argon2id key derivation
  */
 
-import sodium from 'libsodium-wrappers';
+import nacl from 'tweetnacl';
+import { argon2id } from '@noble/hashes/argon2.js';
 
-let sodiumReady = false;
+// Base64 encoding/decoding utilities
+function encodeBase64(data: Uint8Array): string {
+  return Buffer.from(data).toString('base64');
+}
 
-export async function initSodium(): Promise<void> {
-  if (!sodiumReady) {
-    await sodium.ready;
-    sodiumReady = true;
-  }
+function decodeBase64(base64: string): Uint8Array {
+  return new Uint8Array(Buffer.from(base64, 'base64'));
+}
+
+function encodeUTF8(data: Uint8Array): string {
+  return Buffer.from(data).toString('utf8');
+}
+
+function decodeUTF8(str: string): Uint8Array {
+  return new Uint8Array(Buffer.from(str, 'utf8'));
 }
 
 /**
- * Generate a random salt for key derivation
+ * Initialize (no-op for tweetnacl, kept for API compatibility)
+ */
+export async function initSodium(): Promise<void> {
+  // tweetnacl doesn't need initialization
+}
+
+/**
+ * Generate a random salt for key derivation (16 bytes)
  */
 export function generateSalt(): Uint8Array {
-  return sodium.randombytes_buf(sodium.crypto_pwhash_SALTBYTES);
+  return nacl.randomBytes(16);
 }
 
 /**
- * Generate a random nonce for encryption
+ * Generate a random nonce for encryption (24 bytes for XSalsa20)
  */
 export function generateNonce(): Uint8Array {
-  return sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES);
+  return nacl.randomBytes(24);
 }
 
 /**
@@ -38,14 +54,12 @@ export function deriveKeyFromSignature(
   signature: Uint8Array,
   salt: Uint8Array
 ): Uint8Array {
-  return sodium.crypto_pwhash(
-    sodium.crypto_secretbox_KEYBYTES,
-    signature,
-    salt,
-    sodium.crypto_pwhash_OPSLIMIT_INTERACTIVE,
-    sodium.crypto_pwhash_MEMLIMIT_INTERACTIVE,
-    sodium.crypto_pwhash_ALG_ARGON2ID13
-  );
+  return argon2id(signature, salt, {
+    t: 3,      // iterations (OPSLIMIT_INTERACTIVE)
+    m: 65536,  // memory in KiB (MEMLIMIT_INTERACTIVE = 64MB)
+    p: 1,      // parallelism
+    dkLen: 32, // output key length
+  });
 }
 
 /**
@@ -60,7 +74,7 @@ export function encrypt(
   key: Uint8Array,
   nonce: Uint8Array
 ): Uint8Array {
-  return sodium.crypto_secretbox_easy(plaintext, nonce, key);
+  return nacl.secretbox(plaintext, nonce, key);
 }
 
 /**
@@ -76,7 +90,11 @@ export function decrypt(
   key: Uint8Array,
   nonce: Uint8Array
 ): Uint8Array {
-  return sodium.crypto_secretbox_open_easy(ciphertext, nonce, key);
+  const result = nacl.secretbox.open(ciphertext, nonce, key);
+  if (!result) {
+    throw new Error('Decryption failed: invalid key or corrupted data');
+  }
+  return result;
 }
 
 /**
@@ -87,9 +105,9 @@ export function encryptString(
   key: Uint8Array,
   nonce: Uint8Array
 ): string {
-  const plaintextBytes = sodium.from_string(plaintext);
+  const plaintextBytes = decodeUTF8(plaintext);
   const ciphertext = encrypt(plaintextBytes, key, nonce);
-  return sodium.to_base64(ciphertext, sodium.base64_variants.ORIGINAL);
+  return encodeBase64(ciphertext);
 }
 
 /**
@@ -100,31 +118,33 @@ export function decryptString(
   key: Uint8Array,
   nonce: Uint8Array
 ): string {
-  const ciphertext = sodium.from_base64(ciphertextBase64, sodium.base64_variants.ORIGINAL);
+  const ciphertext = decodeBase64(ciphertextBase64);
   const plaintext = decrypt(ciphertext, key, nonce);
-  return sodium.to_string(plaintext);
+  return encodeUTF8(plaintext);
 }
 
 /**
  * Convert Uint8Array to base64
  */
 export function toBase64(data: Uint8Array): string {
-  return sodium.to_base64(data, sodium.base64_variants.ORIGINAL);
+  return encodeBase64(data);
 }
 
 /**
  * Convert base64 to Uint8Array
  */
 export function fromBase64(base64: string): Uint8Array {
-  return sodium.from_base64(base64, sodium.base64_variants.ORIGINAL);
+  return decodeBase64(base64);
 }
 
 /**
  * Generate a secure random string for challenge IDs, unlock codes, etc.
  */
 export function generateRandomId(length: number = 16): string {
-  const bytes = sodium.randombytes_buf(length);
-  return sodium.to_hex(bytes);
+  const bytes = nacl.randomBytes(length);
+  return Array.from(bytes)
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 /**
@@ -133,7 +153,7 @@ export function generateRandomId(length: number = 16): string {
  */
 export function generateUnlockCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No O, 0, I, 1 for clarity
-  const bytes = sodium.randombytes_buf(5);
+  const bytes = nacl.randomBytes(5);
   let code = '';
   for (let i = 0; i < 5; i++) {
     code += chars[bytes[i] % chars.length];
@@ -145,5 +165,5 @@ export function generateUnlockCode(): string {
  * Securely clear a buffer (overwrite with zeros)
  */
 export function secureWipe(buffer: Uint8Array): void {
-  sodium.memzero(buffer);
+  buffer.fill(0);
 }

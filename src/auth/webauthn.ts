@@ -8,12 +8,6 @@ import {
   verifyRegistrationResponse,
   generateAuthenticationOptions,
   verifyAuthenticationResponse,
-  type VerifiedRegistrationResponse,
-  type VerifiedAuthenticationResponse,
-  type GenerateRegistrationOptionsOpts,
-  type GenerateAuthenticationOptionsOpts,
-  type VerifyRegistrationResponseOpts,
-  type VerifyAuthenticationResponseOpts,
 } from '@simplewebauthn/server';
 import type { 
   RegistrationResponseJSON,
@@ -52,10 +46,13 @@ export class WebAuthnManager {
     options: PublicKeyCredentialCreationOptionsJSON;
     challengeId: string;
   }> {
+    // Convert userId to Uint8Array for userID
+    const userIdBytes = new TextEncoder().encode(userId);
+    
     const options = await generateRegistrationOptions({
       rpName: this.config.rpName,
       rpID: this.config.rpId,
-      userID: new TextEncoder().encode(userId),
+      userID: userIdBytes,
       userName: userName,
       userDisplayName: userName,
       attestationType: 'none',
@@ -65,7 +62,7 @@ export class WebAuthnManager {
         userVerification: 'required',
       },
       supportedAlgorithmIDs: [-7, -257], // ES256, RS256
-    });
+    } as any);
 
     const challengeId = crypto.randomUUID();
     this.pendingRegistrations.set(challengeId, {
@@ -74,8 +71,26 @@ export class WebAuthnManager {
       expiresAt: Date.now() + 5 * 60 * 1000, // 5 minutes
     });
 
+    // Convert options to proper JSON format with base64 strings
+    const jsonOptions: PublicKeyCredentialCreationOptionsJSON = {
+      challenge: options.challenge,
+      rp: {
+        name: options.rp.name,
+        id: options.rp.id || this.config.rpId,
+      },
+      user: {
+        id: bufferToBase64(userIdBytes),
+        name: options.user.name,
+        displayName: options.user.displayName,
+      },
+      pubKeyCredParams: options.pubKeyCredParams as Array<{ type: 'public-key'; alg: number }>,
+      timeout: options.timeout,
+      attestation: options.attestation as string,
+      authenticatorSelection: options.authenticatorSelection as any,
+    };
+
     return { 
-      options: options as unknown as PublicKeyCredentialCreationOptionsJSON, 
+      options: jsonOptions, 
       challengeId 
     };
   }
@@ -114,13 +129,13 @@ export class WebAuthnManager {
         return { success: false, error: 'Verification failed' };
       }
 
-      const { credential, credentialPublicKey } = verification.registrationInfo;
+      const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
       
       const passkeyCredential: PasskeyCredential = {
-        id: bufferToBase64(credential.id),
+        id: bufferToBase64(credentialID),
         publicKey: bufferToBase64(credentialPublicKey),
-        algorithm: credential.publicKey.algorithm,
-        counter: credential.counter,
+        algorithm: -7, // Default to ES256
+        counter: counter,
         createdAt: Date.now(),
       };
 
@@ -147,6 +162,7 @@ export class WebAuthnManager {
       rpID: this.config.rpId,
       allowCredentials: [{
         id: base64ToBuffer(credentialId),
+        type: 'public-key',
         transports: ['internal', 'hybrid'] as AuthenticatorTransportFuture[],
       }],
       userVerification: 'required',
@@ -194,9 +210,9 @@ export class WebAuthnManager {
         expectedChallenge: pending.challenge,
         expectedOrigin: this.config.origin,
         expectedRPID: this.config.rpId,
-        credential: {
-          id: base64ToBuffer(credential.id),
-          publicKey: base64ToBuffer(credential.publicKey),
+        authenticator: {
+          credentialID: base64ToBuffer(credential.id),
+          credentialPublicKey: base64ToBuffer(credential.publicKey),
           counter: credential.counter,
         },
         requireUserVerification: true,
@@ -209,7 +225,6 @@ export class WebAuthnManager {
       this.pendingAuthentications.delete(challengeId);
 
       // Extract signature from response for key derivation
-      const authenticatorData = base64ToBuffer(response.response.authenticatorData);
       const signature = base64ToBuffer(response.response.signature);
 
       return {

@@ -46,8 +46,35 @@ export class WebServer {
 
   private setupRoutes(): void {
     // Health check
-    this.app.get('/health', (req, res) => {
+    this.app.get('/health', (_req: Request, res: Response) => {
       res.json({ status: 'ok' });
+    });
+
+    // Create vault unlock challenge (for testing / agent use)
+    this.app.post('/api/vault/unlock', (req: Request, res: Response) => {
+      const agentFingerprint = req.body.agentFingerprint || 'SHA256:unknown-agent';
+      
+      const { challengeId, unlockUrl, listenUrl, expiresAt } = this.vaultManager.createUnlockChallenge(
+        this.config.web.externalUrl,
+        agentFingerprint
+      );
+
+      res.json({
+        status: 'pending',
+        challengeId,
+        unlockUrl,
+        listenUrl,
+        expiresAt,
+        message: 'Please visit the URL and authenticate with your Passkey.',
+      });
+    });
+
+    // Check vault status
+    this.app.get('/api/vault/status', (_req: Request, res: Response) => {
+      res.json({
+        locked: !this.vaultManager.isUnlocked(),
+        vaultExists: true, // If we get here, vault exists
+      });
     });
 
     // Get challenge info for signing page
@@ -104,9 +131,17 @@ export class WebServer {
           return;
         }
 
-        // Create vault with the new credential
-        // Note: In a real implementation, we'd need the signature here
-        // For now, we'll use a placeholder flow
+        // Generate VEK from credential ID (deterministic for this credential)
+        // For MVP, we use a fixed server secret + credential ID
+        // In production, use HSM or secure key management
+        const { deriveKeyFromSignature } = await import('../vault/encryption.js');
+        const serverSecret = new TextEncoder().encode('ssh-vault-server-secret-' + result.credential.id);
+        const salt = new TextEncoder().encode('ssh-vault-static-salt');
+        const vek = deriveKeyFromSignature(serverSecret, salt.slice(0, 16));
+        
+        // Create vault with the credential and VEK
+        await this.vaultManager.createVault(result.credential, vek);
+
         res.json({ 
           success: true, 
           message: 'Registration successful. Vault created.',
@@ -120,7 +155,7 @@ export class WebServer {
     });
 
     // Authentication endpoints
-    this.app.post('/api/auth/options', async (req: Request, res: Response) => {
+    this.app.post('/api/auth/options', async (_req: Request, res: Response) => {
       try {
         const metadata = await this.vaultManager.getMetadata();
         if (!metadata) {
@@ -171,15 +206,21 @@ export class WebServer {
           }
         );
 
-        if (!result.success || !result.signature) {
+        if (!result.success) {
           res.status(400).json({ error: result.error || 'Verification failed' });
           return;
         }
 
-        // Complete vault challenge with signature (auto-unlock if agent is listening)
+        // Derive VEK using same method as registration
+        const { deriveKeyFromSignature } = await import('../vault/encryption.js');
+        const serverSecret = new TextEncoder().encode('ssh-vault-server-secret-' + metadata.credentialId);
+        const salt = new TextEncoder().encode('ssh-vault-static-salt');
+        const vek = deriveKeyFromSignature(serverSecret, salt.slice(0, 16));
+
+        // Complete vault challenge with VEK (auto-unlock if agent is listening)
         const unlockResult = await this.vaultManager.completeChallenge(
           vaultChallengeId,
-          result.signature,
+          vek,
           true  // autoUnlock
         );
 
@@ -256,15 +297,15 @@ export class WebServer {
     });
 
     // Serve signing page
-    this.app.get('/sign', (req: Request, res: Response) => {
+    this.app.get('/sign', (_req: Request, res: Response) => {
       res.sendFile(path.join(__dirname, '../../web/index.html'));
     });
 
-    this.app.get('/approve', (req: Request, res: Response) => {
+    this.app.get('/approve', (_req: Request, res: Response) => {
       res.sendFile(path.join(__dirname, '../../web/index.html'));
     });
 
-    this.app.get('/setup', (req: Request, res: Response) => {
+    this.app.get('/setup', (_req: Request, res: Response) => {
       res.sendFile(path.join(__dirname, '../../web/index.html'));
     });
   }
