@@ -176,10 +176,11 @@ export class WebServer {
           return;
         }
 
-        // Complete vault challenge with signature
-        const unlockResult = this.vaultManager.completeChallenge(
+        // Complete vault challenge with signature (auto-unlock if agent is listening)
+        const unlockResult = await this.vaultManager.completeChallenge(
           vaultChallengeId,
-          result.signature
+          result.signature,
+          true  // autoUnlock
         );
 
         if (!unlockResult) {
@@ -187,15 +188,70 @@ export class WebServer {
           return;
         }
 
-        res.json({
-          success: true,
-          unlockCode: unlockResult.unlockCode,
-          message: 'Authentication successful. Use this code to unlock the vault.',
-        });
+        if (unlockResult.autoUnlocked) {
+          res.json({
+            success: true,
+            autoUnlocked: true,
+            sessionId: unlockResult.sessionId,
+            message: 'Authentication successful. Agent has been notified.',
+          });
+        } else {
+          res.json({
+            success: true,
+            unlockCode: unlockResult.unlockCode,
+            message: 'Authentication successful. Use this code to unlock the vault.',
+          });
+        }
       } catch (error) {
         res.status(500).json({ 
           error: error instanceof Error ? error.message : 'Verification failed' 
         });
+      }
+    });
+
+    // SSE endpoint for listening to challenge completion
+    this.app.get('/api/challenge/:id/listen', (req: Request, res: Response) => {
+      const challengeId = req.params.id;
+      
+      // Check if challenge exists
+      const challenge = this.vaultManager.getChallenge(challengeId);
+      if (!challenge) {
+        res.status(404).json({ error: 'Challenge not found or expired' });
+        return;
+      }
+
+      // Set up SSE
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no'); // For nginx
+      
+      // Send initial connection event
+      res.write(`data: ${JSON.stringify({ type: 'connected', challengeId })}\n\n`);
+
+      // Subscribe to challenge events
+      const unsubscribe = this.vaultManager.subscribeToChallenge(challengeId, (event) => {
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+        
+        // Close connection after approval
+        if (event.type === 'approved' || event.type === 'error') {
+          res.end();
+        }
+      });
+
+      // Handle client disconnect
+      req.on('close', () => {
+        unsubscribe();
+      });
+
+      // Timeout after challenge expires
+      const timeoutMs = challenge.expiresAt - Date.now();
+      if (timeoutMs > 0) {
+        setTimeout(() => {
+          res.write(`data: ${JSON.stringify({ type: 'expired', challengeId })}\n\n`);
+          res.end();
+          unsubscribe();
+        }, timeoutMs);
       }
     });
 

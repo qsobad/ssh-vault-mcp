@@ -426,7 +426,26 @@
         throw new Error(result.error || 'Authentication failed');
       }
 
-      showUnlockCode(result.unlockCode);
+      if (result.autoUnlocked) {
+        showAutoUnlocked();
+      } else {
+        showUnlockCode(result.unlockCode);
+      }
+    }
+
+    function showAutoUnlocked() {
+      const result = document.getElementById('result');
+      const content = document.getElementById('resultContent');
+
+      content.innerHTML = `
+        <div>✅ Authentication successful!</div>
+        <div style="margin-top: 12px; color: var(--success);">
+          🔔 Agent has been notified automatically
+        </div>
+        <div class="copy-hint" style="margin-top: 8px;">You can close this page</div>
+      `;
+
+      result.className = 'result success';
     }
 
     function showUnlockCode(code) {

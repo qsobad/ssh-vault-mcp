@@ -29,17 +29,23 @@ Returns:
 {
   "status": "pending",
   "unlockUrl": "https://vault.example.com/sign?challenge=abc123",
+  "listenUrl": "https://vault.example.com/api/challenge/abc123/listen",
   "message": "Please visit the URL and authenticate with your Passkey."
 }
 ```
 
 **Action**: Show the URL to the user and ask them to authenticate.
 
-After authentication, user provides an unlock code like `UNLOCK-X7K9P`.
+**Two ways to complete:**
 
-```json
-{ "tool": "submit_unlock", "unlock_code": "UNLOCK-X7K9P" }
-```
+**Option A: Automatic notification (preferred)**
+- Connect to `listenUrl` via SSE
+- Wait for `{ type: "approved" }` event
+- Continue automatically
+
+**Option B: Manual code**
+- User copies unlock code from web page
+- Submit with: `{ "tool": "submit_unlock", "unlock_code": "UNLOCK-X7K9P" }`
 
 ### 3. List Available Hosts
 

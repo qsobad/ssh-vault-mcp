@@ -258,8 +258,9 @@ export class MCPServer {
       }
     }
 
-    const { challengeId, unlockUrl, expiresAt } = this.vaultManager.createUnlockChallenge(
-      this.config.web.externalUrl
+    const { challengeId, unlockUrl, listenUrl, expiresAt } = this.vaultManager.createUnlockChallenge(
+      this.config.web.externalUrl,
+      this.agentFingerprint
     );
 
     return {
@@ -268,9 +269,10 @@ export class MCPServer {
         text: JSON.stringify({
           status: 'pending',
           unlockUrl,
+          listenUrl,
           challengeId,
           expiresAt,
-          message: 'Please visit the URL and authenticate with your Passkey. Then provide the unlock code.',
+          message: 'Please visit the URL and authenticate with your Passkey. You will be notified automatically when approved, or you can provide the unlock code manually.',
         }, null, 2),
       }],
     };
@@ -382,7 +384,7 @@ export class MCPServer {
 
     if (!policyResult.allowed) {
       // Need approval
-      const { approvalUrl, challengeId, expiresAt } = this.vaultManager.createApprovalChallenge(
+      const { approvalUrl, listenUrl, challengeId, expiresAt } = this.vaultManager.createApprovalChallenge(
         this.config.web.externalUrl,
         this.agentFingerprint,
         host.name,
@@ -396,9 +398,10 @@ export class MCPServer {
             needsApproval: true,
             reason: policyResult.reason,
             approvalUrl,
+            listenUrl,
             challengeId,
             expiresAt,
-            message: 'This command requires approval. Please visit the URL and authenticate.',
+            message: 'This command requires approval. Please visit the URL and authenticate. You will be notified automatically when approved.',
           }, null, 2),
         }],
       };

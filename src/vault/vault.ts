@@ -11,8 +11,17 @@ import { generateRandomId, generateUnlockCode, secureWipe, initSodium } from './
 interface PendingChallenge {
   challenge: UnlockChallenge;
   unlockCode: string;
-  signature?: Uint8Array;  // Stored after successful verification
+  agentFingerprint: string;  // Store requesting agent
+  signature?: Uint8Array;    // Stored after successful verification
 }
+
+// Event emitter for SSE notifications
+type ChallengeEventListener = (event: {
+  type: 'approved' | 'expired' | 'error';
+  challengeId: string;
+  sessionId?: string;
+  error?: string;
+}) => void;
 
 export class VaultManager {
   private storage: VaultStorage;
@@ -22,6 +31,9 @@ export class VaultManager {
   private sessionTimeoutMs: number;
   private challengeTimeoutMs: number = 5 * 60 * 1000; // 5 minutes
   private currentSignature: Uint8Array | null = null;
+  
+  // SSE event listeners per challenge
+  private challengeListeners: Map<string, Set<ChallengeEventListener>> = new Map();
 
   constructor(
     vaultPath: string,
@@ -81,9 +93,10 @@ export class VaultManager {
    * Create an unlock challenge
    * Returns the challenge and a URL for the signing page
    */
-  createUnlockChallenge(baseUrl: string): {
+  createUnlockChallenge(baseUrl: string, agentFingerprint: string): {
     challengeId: string;
     unlockUrl: string;
+    listenUrl: string;
     expiresAt: number;
   } {
     const challenge: UnlockChallenge = {
@@ -99,6 +112,7 @@ export class VaultManager {
     this.pendingChallenges.set(challenge.id, {
       challenge,
       unlockCode,
+      agentFingerprint,
     });
 
     // Clean up expired challenges
@@ -107,6 +121,7 @@ export class VaultManager {
     return {
       challengeId: challenge.id,
       unlockUrl: `${baseUrl}/sign?challenge=${challenge.id}`,
+      listenUrl: `${baseUrl}/api/challenge/${challenge.id}/listen`,
       expiresAt: challenge.expiresAt,
     };
   }
@@ -122,6 +137,7 @@ export class VaultManager {
   ): {
     challengeId: string;
     approvalUrl: string;
+    listenUrl: string;
     expiresAt: number;
   } {
     const challenge: UnlockChallenge = {
@@ -140,11 +156,13 @@ export class VaultManager {
     this.pendingChallenges.set(challenge.id, {
       challenge,
       unlockCode,
+      agentFingerprint,
     });
 
     return {
       challengeId: challenge.id,
       approvalUrl: `${baseUrl}/approve?challenge=${challenge.id}`,
+      listenUrl: `${baseUrl}/api/challenge/${challenge.id}/listen`,
       expiresAt: challenge.expiresAt,
     };
   }
@@ -163,18 +181,40 @@ export class VaultManager {
   /**
    * Complete challenge after successful Passkey verification
    * Called by the signing page after WebAuthn verification
+   * If autoUnlock is true and there are listeners, automatically unlock
    */
-  completeChallenge(
+  async completeChallenge(
     challengeId: string,
-    signature: Uint8Array
-  ): { unlockCode: string } | null {
+    signature: Uint8Array,
+    autoUnlock: boolean = true
+  ): Promise<{ 
+    unlockCode: string;
+    autoUnlocked?: boolean;
+    sessionId?: string;
+  } | null> {
     const pending = this.pendingChallenges.get(challengeId);
     if (!pending || pending.challenge.expiresAt < Date.now()) {
       return null;
     }
 
-    // Store signature for later use
+    // Store signature
     pending.signature = new Uint8Array(signature);
+    
+    // Auto-unlock if there are listeners waiting
+    if (autoUnlock && this.hasListeners(challengeId)) {
+      const result = await this.submitUnlockCode(
+        pending.unlockCode,
+        pending.agentFingerprint
+      );
+      
+      if (result.success) {
+        return {
+          unlockCode: pending.unlockCode,
+          autoUnlocked: true,
+          sessionId: result.sessionId,
+        };
+      }
+    }
     
     return { unlockCode: pending.unlockCode };
   }
@@ -221,8 +261,16 @@ export class VaultManager {
         // Create session
         const session = this.createSession(agentFingerprint);
         
+        // Emit event to listeners
+        this.emitChallengeEvent(foundId, {
+          type: 'approved',
+          challengeId: foundId,
+          sessionId: session.id,
+        });
+        
         // Cleanup
         this.pendingChallenges.delete(foundId);
+        this.challengeListeners.delete(foundId);
         
         return {
           success: true,
@@ -244,7 +292,16 @@ export class VaultManager {
         }
         session.approvedCommands[host].push(...commands);
         
+        // Emit event to listeners
+        this.emitChallengeEvent(foundId, {
+          type: 'approved',
+          challengeId: foundId,
+          sessionId: session.id,
+        });
+        
+        // Cleanup
         this.pendingChallenges.delete(foundId);
+        this.challengeListeners.delete(foundId);
         
         return {
           success: true,
@@ -452,5 +509,53 @@ export class VaultManager {
         this.sessions.delete(id);
       }
     }
+  }
+
+  /**
+   * Subscribe to challenge events (for SSE)
+   */
+  subscribeToChallenge(challengeId: string, listener: ChallengeEventListener): () => void {
+    if (!this.challengeListeners.has(challengeId)) {
+      this.challengeListeners.set(challengeId, new Set());
+    }
+    this.challengeListeners.get(challengeId)!.add(listener);
+
+    // Return unsubscribe function
+    return () => {
+      const listeners = this.challengeListeners.get(challengeId);
+      if (listeners) {
+        listeners.delete(listener);
+        if (listeners.size === 0) {
+          this.challengeListeners.delete(challengeId);
+        }
+      }
+    };
+  }
+
+  /**
+   * Emit event to challenge listeners
+   */
+  private emitChallengeEvent(
+    challengeId: string,
+    event: Parameters<ChallengeEventListener>[0]
+  ): void {
+    const listeners = this.challengeListeners.get(challengeId);
+    if (listeners) {
+      for (const listener of listeners) {
+        try {
+          listener(event);
+        } catch (e) {
+          // Ignore listener errors
+        }
+      }
+    }
+  }
+
+  /**
+   * Check if a challenge has active listeners
+   */
+  hasListeners(challengeId: string): boolean {
+    const listeners = this.challengeListeners.get(challengeId);
+    return listeners !== undefined && listeners.size > 0;
   }
 }
