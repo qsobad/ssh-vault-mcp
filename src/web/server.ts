@@ -436,6 +436,7 @@ export class WebServer {
           res.json({
             success: true,
             autoUnlocked: true,
+            unlockCode: unlockResult.unlockCode, // Fallback if agent missed SSE
             sessionId: unlockResult.sessionId,
             message: 'Authentication successful. Agent has been notified.',
           });

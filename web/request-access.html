@@ -312,11 +312,17 @@
         
         const statusEl = document.getElementById('result-status');
         statusEl.className = 'status success';
-        statusEl.innerHTML = '✅ Access granted!<br><small>The agent will be notified automatically.</small>';
+        
+        if (result.autoUnlocked) {
+          statusEl.innerHTML = '✅ Access granted!<br><small>Agent notified automatically.</small>';
+        } else {
+          statusEl.textContent = '✅ Access granted!';
+        }
         
         if (result.unlockCode) {
-          document.getElementById('unlock-code').textContent = result.unlockCode;
-          document.getElementById('unlock-code').classList.remove('hidden');
+          const codeEl = document.getElementById('unlock-code');
+          codeEl.textContent = result.unlockCode;
+          codeEl.classList.remove('hidden');
         }
 
       } catch (error) {
