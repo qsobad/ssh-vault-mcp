@@ -136,6 +136,48 @@ export class WebServer {
       });
     });
 
+    // List agent's approved hosts (works even when vault is locked)
+    this.app.get('/api/agent/hosts', async (req: Request, res: Response) => {
+      const { fingerprint, signature, timestamp, nonce, publicKey } = req.query as Record<string, string>;
+
+      if (!fingerprint || !signature || !timestamp || !nonce || !publicKey) {
+        res.status(401).json({ error: 'Agent signature required (fingerprint, publicKey, signature, timestamp, nonce)' });
+        return;
+      }
+
+      try {
+        const { verifySignedRequest, fingerprintFromPublicKey } = await import('../auth/agent.js');
+        const verified = verifySignedRequest({
+          signature, publicKey, timestamp: Number(timestamp), nonce,
+          payload: `list_hosts:${timestamp}`
+        });
+        if (!verified) {
+          res.status(401).json({ error: 'Invalid signature' });
+          return;
+        }
+
+        const derivedFp = fingerprintFromPublicKey(publicKey);
+        if (derivedFp !== fingerprint) {
+          res.status(401).json({ error: 'Fingerprint mismatch' });
+          return;
+        }
+
+        const session = this.vaultManager.getSessionByAgent(fingerprint);
+        if (!session) {
+          res.status(403).json({ error: 'No active session. Use /api/agent/request-access first.' });
+          return;
+        }
+
+        res.json({
+          hosts: session.approvedHosts,
+          sessionId: session.id,
+          expiresAt: session.expiresAt,
+        });
+      } catch (error) {
+        res.status(500).json({ error: 'Internal error' });
+      }
+    });
+
     // Execute SSH command
     this.app.post('/api/vault/execute', async (req: Request, res: Response) => {
       const { host, command, sessionId, signature, publicKey, timestamp, nonce, timeout } = req.body;
