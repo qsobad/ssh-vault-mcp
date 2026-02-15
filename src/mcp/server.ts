@@ -168,15 +168,6 @@ const TOOLS: Tool[] = [
     },
   },
   {
-    name: 'generate_keypair',
-    description: 'Generate a new Ed25519 keypair for agent authentication. Returns public key, private key, and fingerprint. Store the private key securely!',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  },
-  {
     name: 'request_access',
     description: 'Request access to SSH hosts. Returns a URL for user approval via Passkey. Agent will be auto-enlisted if not already registered.',
     inputSchema: {
@@ -268,9 +259,6 @@ export class MCPServer {
 
       try {
         // Tools that don't require signature (not yet registered)
-        if (name === 'generate_keypair') {
-          return this.handleGenerateKeypair();
-        }
         if (name === 'request_access') {
           return this.handleRequestAccess(typedArgs);
         }
@@ -323,23 +311,6 @@ export class MCPServer {
         };
       }
     });
-  }
-
-  private handleGenerateKeypair() {
-    const { generateAgentKeypair } = require('../auth/agent.js');
-    const keypair = generateAgentKeypair();
-    
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify({
-          publicKey: keypair.publicKey,
-          privateKey: keypair.privateKey,
-          fingerprint: keypair.fingerprint,
-          warning: 'Store the private key securely! It cannot be recovered.',
-        }, null, 2),
-      }],
-    };
   }
 
   private handleRequestAccess(args: Record<string, unknown>) {
