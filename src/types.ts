@@ -58,7 +58,8 @@ export interface VaultFile {
   publicKey: string;          // For signature verification (base64)
   algorithm: number;
   counter: number;
-  salt: string;               // For key derivation (base64)
+  passwordSalt: string;       // For password-based key derivation (base64)
+  salt: string;               // For encryption key derivation (base64)
   nonce: string;              // For encryption (base64)
   data: string;               // Encrypted vault data (base64)
 }

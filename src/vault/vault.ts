@@ -69,25 +69,42 @@ export class VaultManager {
   }
 
   /**
+   * Reload vault from storage (refresh in-memory data)
+   */
+  async reloadVault(): Promise<void> {
+    if (this.currentSignature) {
+      this.vault = await this.storage.load(this.currentSignature);
+    }
+  }
+
+  /**
    * Get vault metadata (without unlocking)
    */
   async getMetadata(): Promise<{
     credentialId: string;
     publicKey: string;
     algorithm: number;
+    passwordSalt: string;
   } | null> {
     return this.storage.getMetadata();
   }
 
   /**
    * Create a new vault with Passkey registration
+   * @param credential - Passkey credential
+   * @param vek - Vault Encryption Key (derived from master password)
+   * @param passwordSalt - Base64-encoded salt used for password key derivation
    */
   async createVault(
     credential: PasskeyCredential,
-    signature: Uint8Array
+    vek: Uint8Array,
+    passwordSalt?: string
   ): Promise<void> {
-    this.vault = await this.storage.create(credential, signature);
-    this.currentSignature = new Uint8Array(signature);
+    this.vault = await this.storage.create(credential, vek);
+    if (passwordSalt) {
+      await this.storage.saveWithPasswordSalt(this.vault, vek, passwordSalt);
+    }
+    this.currentSignature = new Uint8Array(vek);
   }
 
   /**

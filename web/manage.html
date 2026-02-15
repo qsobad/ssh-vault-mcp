@@ -197,6 +197,10 @@
       <div class="logo">🔐</div>
       <h2>SSH Vault</h2>
       <p id="authStatus">Authenticate to access vault</p>
+      <div class="form-group" style="text-align: left; margin-bottom: 16px;">
+        <label style="color: var(--text-dim);">Master Password</label>
+        <input type="password" id="authPassword" placeholder="Enter master password" style="width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px;">
+      </div>
       <button class="btn btn-primary" id="authBtn" onclick="doAuth()" style="width: 100%; padding: 14px;">
         👆 Use Passkey
       </button>
@@ -438,8 +442,9 @@
         vaultExists = status.vaultExists;
         
         if (!vaultExists) {
-          document.getElementById('authStatus').textContent = 'Create Passkey to setup vault';
+          document.getElementById('authStatus').textContent = 'Set a master password and create Passkey';
           document.getElementById('authBtn').textContent = '➕ Create Passkey';
+          document.getElementById('authPassword').placeholder = 'Set master password (min 8 chars)';
         }
       } catch (e) {
         console.error('Failed to check vault status:', e);
@@ -468,6 +473,10 @@
     }
 
     async function setupVault() {
+      const password = document.getElementById('authPassword').value;
+      if (!password) throw new Error('Master password is required');
+      if (password.length < 8) throw new Error('Password must be at least 8 characters');
+
       const optionsRes = await fetch('/api/register/options', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -489,6 +498,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           challengeId,
+          password,
           response: {
             id: credential.id,
             rawId: bufferToBase64(credential.rawId),
@@ -515,6 +525,9 @@
 
     async function authenticate() {
       try {
+        const password = document.getElementById('authPassword').value;
+        if (!password) throw new Error('Master password is required');
+
         // Get auth options
         const optionsRes = await fetch('/api/auth/options', { method: 'POST' });
         if (!optionsRes.ok) throw new Error('Failed to get options');
@@ -537,6 +550,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             challengeId,
+            password,
             response: {
               id: credential.id,
               rawId: bufferToBase64(credential.rawId),

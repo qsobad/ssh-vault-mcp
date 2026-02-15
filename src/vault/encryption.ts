@@ -46,17 +46,34 @@ export function generateNonce(): Uint8Array {
 
 /**
  * Derive encryption key from Passkey signature using Argon2id
- * @param signature - The WebAuthn signature bytes
- * @param salt - Salt for key derivation
- * @returns 32-byte encryption key
+ * @deprecated Use deriveKeyFromPassword instead
  */
 export function deriveKeyFromSignature(
   signature: Uint8Array,
   salt: Uint8Array
 ): Uint8Array {
   return argon2id(signature, salt, {
-    t: 3,      // iterations (OPSLIMIT_INTERACTIVE)
-    m: 65536,  // memory in KiB (MEMLIMIT_INTERACTIVE = 64MB)
+    t: 3,
+    m: 65536,
+    p: 1,
+    dkLen: 32,
+  });
+}
+
+/**
+ * Derive encryption key from master password using Argon2id
+ * @param password - The master password
+ * @param salt - Random salt for key derivation
+ * @returns 32-byte encryption key (VEK)
+ */
+export function deriveKeyFromPassword(
+  password: string,
+  salt: Uint8Array
+): Uint8Array {
+  const passwordBytes = new TextEncoder().encode(password);
+  return argon2id(passwordBytes, salt, {
+    t: 3,      // iterations
+    m: 65536,  // 64MB memory
     p: 1,      // parallelism
     dkLen: 32, // output key length
   });

@@ -69,6 +69,32 @@ export class WebServer {
       });
     });
 
+    // Submit unlock code
+    this.app.post('/api/vault/submit-unlock', async (req: Request, res: Response) => {
+      const { unlockCode, agentFingerprint } = req.body;
+      
+      if (!unlockCode) {
+        res.status(400).json({ error: 'unlockCode required' });
+        return;
+      }
+
+      const result = await this.vaultManager.submitUnlockCode(
+        unlockCode,
+        agentFingerprint || 'SHA256:unknown-agent'
+      );
+
+      if (result.success) {
+        res.json({
+          success: true,
+          sessionId: result.sessionId,
+          expiresAt: result.expiresAt,
+          message: 'Vault unlocked successfully',
+        });
+      } else {
+        res.status(400).json({ error: result.error });
+      }
+    });
+
     // Check vault status
     this.app.get('/api/vault/status', async (_req: Request, res: Response) => {
       const exists = await this.vaultManager.vaultExists();
@@ -76,6 +102,95 @@ export class WebServer {
         locked: !this.vaultManager.isUnlocked(),
         vaultExists: exists,
       });
+    });
+
+    // Execute SSH command
+    this.app.post('/api/vault/execute', async (req: Request, res: Response) => {
+      const { host, command } = req.body;
+
+      if (!host || !command) {
+        res.status(400).json({ error: 'host and command required' });
+        return;
+      }
+
+      if (!this.vaultManager.isUnlocked()) {
+        res.status(403).json({ error: 'Vault is locked' });
+        return;
+      }
+
+      try {
+        // Reload vault to get latest config
+        await this.vaultManager.reloadVault();
+        
+        // Get host config from vault
+        const hostConfig = this.vaultManager.getHost(host);
+        if (!hostConfig) {
+          res.status(404).json({ error: `Host '${host}' not found` });
+          return;
+        }
+
+        // Execute SSH command
+        const { Client } = await import('ssh2');
+        const ssh = new Client();
+
+        const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolve, reject) => {
+          ssh.on('ready', () => {
+            ssh.exec(command, (err, stream) => {
+              if (err) {
+                ssh.end();
+                reject(err);
+                return;
+              }
+
+              let stdout = '';
+              let stderr = '';
+
+              stream.on('data', (data: Buffer) => { stdout += data.toString(); });
+              stream.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
+              stream.on('close', (code: number) => {
+                ssh.end();
+                resolve({ stdout, stderr, code });
+              });
+            });
+          });
+
+          ssh.on('error', reject);
+
+          const connectConfig: any = {
+            host: hostConfig.hostname,
+            port: hostConfig.port || 22,
+            username: hostConfig.username,
+          };
+
+          console.log('[execute] authType:', hostConfig.authType, 'credential length:', hostConfig.credential?.length || 0);
+          if (hostConfig.authType === 'key' || hostConfig.credential?.includes('PRIVATE KEY')) {
+            connectConfig.privateKey = hostConfig.credential;
+            console.log('[execute] Using SSH key auth');
+          } else if (hostConfig.credential) {
+            connectConfig.password = hostConfig.credential;
+            console.log('[execute] Using password auth');
+          } else {
+            console.log('[execute] No credential configured!');
+          }
+
+          console.log('[execute] Connecting to:', connectConfig.host, connectConfig.port, connectConfig.username);
+          ssh.connect(connectConfig);
+        });
+
+        res.json({
+          success: true,
+          host,
+          command,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.code,
+        });
+      } catch (error) {
+        console.error('[execute] Error:', error);
+        res.status(500).json({ 
+          error: 'Command execution failed: ' + (error instanceof Error ? error.message : String(error))
+        });
+      }
     });
 
     // Get challenge info for signing page
@@ -122,9 +237,13 @@ export class WebServer {
 
     this.app.post('/api/register/verify', async (req: Request, res: Response) => {
       try {
-        const { challengeId, response } = req.body;
+        const { challengeId, response, password } = req.body;
         if (!challengeId || !response) {
           res.status(400).json({ error: 'challengeId and response required' });
+          return;
+        }
+        if (!password) {
+          res.status(400).json({ error: 'Master password required' });
           return;
         }
 
@@ -135,18 +254,14 @@ export class WebServer {
           return;
         }
 
-        // Generate VEK from credential ID (deterministic for this credential)
-        // For MVP, we use a fixed server secret + credential ID
-        // In production, use HSM or secure key management
-        const { deriveKeyFromSignature } = await import('../vault/encryption.js');
-        console.log('[register] credential.id:', result.credential.id);
-        const serverSecret = new TextEncoder().encode('ssh-vault-server-secret-' + result.credential.id);
-        const salt = new TextEncoder().encode('ssh-vault-static-salt');
-        const vek = deriveKeyFromSignature(serverSecret, salt.slice(0, 16));
-        console.log('[register] VEK derived, length:', vek.length);
+        // Derive VEK from master password + random salt
+        const { deriveKeyFromPassword, generateSalt, toBase64 } = await import('../vault/encryption.js');
+        const passwordSalt = generateSalt();
+        const vek = deriveKeyFromPassword(password, passwordSalt);
+        console.log('[register] VEK derived from password, length:', vek.length);
         
         // Create vault with the credential and VEK
-        await this.vaultManager.createVault(result.credential, vek);
+        await this.vaultManager.createVault(result.credential, vek, toBase64(passwordSalt));
 
         // Create management session so user doesn't need to auth again
         const token = crypto.randomUUID();
@@ -243,12 +358,17 @@ export class WebServer {
 
     this.app.post('/api/auth/verify', async (req: Request, res: Response) => {
       try {
-        const { webauthnChallengeId, vaultChallengeId, response, allowedHosts } = req.body;
+        const { webauthnChallengeId, vaultChallengeId, response, allowedHosts, password } = req.body;
         
         if (!webauthnChallengeId || !vaultChallengeId || !response) {
           res.status(400).json({ 
             error: 'webauthnChallengeId, vaultChallengeId, and response required' 
           });
+          return;
+        }
+
+        if (!password) {
+          res.status(400).json({ error: 'Master password required' });
           return;
         }
 
@@ -282,11 +402,10 @@ export class WebServer {
           return;
         }
 
-        // Derive VEK using same method as registration
-        const { deriveKeyFromSignature } = await import('../vault/encryption.js');
-        const serverSecret = new TextEncoder().encode('ssh-vault-server-secret-' + metadata.credentialId);
-        const salt = new TextEncoder().encode('ssh-vault-static-salt');
-        const vek = deriveKeyFromSignature(serverSecret, salt.slice(0, 16));
+        // Derive VEK from password + stored salt
+        const { deriveKeyFromPassword, fromBase64: fromB64 } = await import('../vault/encryption.js');
+        const passwordSalt = fromB64(metadata.passwordSalt);
+        const vek = deriveKeyFromPassword(password, passwordSalt);
 
         // Complete vault challenge with VEK (auto-unlock if agent is listening)
         const unlockResult = await this.vaultManager.completeChallenge(
@@ -387,8 +506,13 @@ export class WebServer {
     // Authenticate for management
     this.app.post('/api/manage/auth', async (req: Request, res: Response) => {
       try {
-        const { challengeId, response } = req.body;
+        const { challengeId, response, password } = req.body;
         
+        if (!password) {
+          res.status(400).json({ error: 'Master password required' });
+          return;
+        }
+
         const metadata = await this.vaultManager.getMetadata();
         if (!metadata) {
           res.status(404).json({ error: 'No vault found' });
@@ -412,13 +536,21 @@ export class WebServer {
           return;
         }
 
-        // Derive VEK and create management session
-        const { deriveKeyFromSignature } = await import('../vault/encryption.js');
-        console.log('[manage-auth] credentialId:', metadata.credentialId);
-        const serverSecret = new TextEncoder().encode('ssh-vault-server-secret-' + metadata.credentialId);
-        const salt = new TextEncoder().encode('ssh-vault-static-salt');
-        const vek = deriveKeyFromSignature(serverSecret, salt.slice(0, 16));
-        console.log('[manage-auth] VEK derived, length:', vek.length);
+        // Derive VEK from password + stored salt
+        const { deriveKeyFromPassword, fromBase64 } = await import('../vault/encryption.js');
+        const passwordSalt = fromBase64(metadata.passwordSalt);
+        const vek = deriveKeyFromPassword(password, passwordSalt);
+        console.log('[manage-auth] VEK derived from password, length:', vek.length);
+
+        // Verify VEK by trying to decrypt vault
+        try {
+          const { VaultStorage } = await import('../vault/storage.js');
+          const storage = new VaultStorage(this.config.vault.path, false);
+          await storage.load(vek);
+        } catch {
+          res.status(401).json({ error: 'Invalid password' });
+          return;
+        }
 
         const token = crypto.randomUUID();
         manageSessions.set(token, {

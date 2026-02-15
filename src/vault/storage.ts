@@ -10,7 +10,6 @@ import {
   initSodium,
   generateSalt,
   generateNonce,
-  deriveKeyFromSignature,
   encryptString,
   decryptString,
   toBase64,
@@ -42,11 +41,11 @@ export class VaultStorage {
   /**
    * Create a new vault with the given Passkey credential
    * @param credential - The Passkey credential from registration
-   * @param signature - The WebAuthn signature for key derivation
+   * @param vek - The Vault Encryption Key (derived from master password)
    */
   async create(
     credential: PasskeyCredential,
-    signature: Uint8Array
+    vek: Uint8Array
   ): Promise<Vault> {
     await initSodium();
 
@@ -61,14 +60,14 @@ export class VaultStorage {
       },
     };
 
-    await this.save(vault, signature);
+    await this.save(vault, vek);
     return vault;
   }
 
   /**
    * Save vault to encrypted file
    */
-  async save(vault: Vault, signature: Uint8Array): Promise<void> {
+  async save(vault: Vault, vek: Uint8Array): Promise<void> {
     await initSodium();
 
     // Create backup if enabled and file exists
@@ -79,11 +78,18 @@ export class VaultStorage {
 
     const salt = generateSalt();
     const nonce = generateNonce();
-    const key = deriveKeyFromSignature(signature, salt);
 
     try {
       const vaultJson = JSON.stringify(vault);
-      const encryptedData = encryptString(vaultJson, key, nonce);
+      const encryptedData = encryptString(vaultJson, vek, nonce);
+
+      // Read existing file to preserve passwordSalt
+      let passwordSalt = '';
+      if (await this.exists()) {
+        const fileContent = await fs.readFile(this.vaultPath, 'utf-8');
+        const existing: VaultFile = JSON.parse(fileContent);
+        passwordSalt = existing.passwordSalt;
+      }
 
       const vaultFile: VaultFile = {
         version: 1,
@@ -91,6 +97,7 @@ export class VaultStorage {
         publicKey: vault.owner.publicKey,
         algorithm: vault.owner.algorithm,
         counter: vault.owner.counter,
+        passwordSalt,
         salt: toBase64(salt),
         nonce: toBase64(nonce),
         data: encryptedData,
@@ -100,20 +107,57 @@ export class VaultStorage {
       const dir = path.dirname(this.vaultPath);
       await fs.mkdir(dir, { recursive: true });
 
-      // Write atomically (write to temp, then rename)
+      // Write atomically (write to temp, then rename) with restrictive permissions
       const tempPath = `${this.vaultPath}.tmp`;
-      await fs.writeFile(tempPath, JSON.stringify(vaultFile, null, 2));
+      await fs.writeFile(tempPath, JSON.stringify(vaultFile, null, 2), { mode: 0o600 });
       await fs.rename(tempPath, this.vaultPath);
     } finally {
-      // Clear sensitive data from memory
-      secureWipe(key);
+      // Wipe encryption key from memory
+      secureWipe(vek);
     }
   }
 
   /**
-   * Load and decrypt vault using Passkey signature
+   * Save vault with passwordSalt (for initial creation)
    */
-  async load(signature: Uint8Array): Promise<Vault> {
+  async saveWithPasswordSalt(vault: Vault, vek: Uint8Array, passwordSalt: string): Promise<void> {
+    await initSodium();
+
+    if (this.backupEnabled && await this.exists()) {
+      const backupPath = `${this.vaultPath}.backup`;
+      await fs.copyFile(this.vaultPath, backupPath);
+    }
+
+    const salt = generateSalt();
+    const nonce = generateNonce();
+
+    const vaultJson = JSON.stringify(vault);
+    const encryptedData = encryptString(vaultJson, vek, nonce);
+
+    const vaultFile: VaultFile = {
+      version: 1,
+      credentialId: vault.owner.id,
+      publicKey: vault.owner.publicKey,
+      algorithm: vault.owner.algorithm,
+      counter: vault.owner.counter,
+      passwordSalt,
+      salt: toBase64(salt),
+      nonce: toBase64(nonce),
+      data: encryptedData,
+    };
+
+    const dir = path.dirname(this.vaultPath);
+    await fs.mkdir(dir, { recursive: true });
+
+    const tempPath = `${this.vaultPath}.tmp`;
+    await fs.writeFile(tempPath, JSON.stringify(vaultFile, null, 2), { mode: 0o600 });
+    await fs.rename(tempPath, this.vaultPath);
+  }
+
+  /**
+   * Load and decrypt vault using VEK
+   */
+  async load(vek: Uint8Array): Promise<Vault> {
     await initSodium();
 
     const fileContent = await fs.readFile(this.vaultPath, 'utf-8');
@@ -123,17 +167,13 @@ export class VaultStorage {
       throw new Error(`Unsupported vault version: ${vaultFile.version}`);
     }
 
-    const salt = fromBase64(vaultFile.salt);
     const nonce = fromBase64(vaultFile.nonce);
-    const key = deriveKeyFromSignature(signature, salt);
 
     try {
-      const vaultJson = decryptString(vaultFile.data, key, nonce);
+      const vaultJson = decryptString(vaultFile.data, vek, nonce);
       return JSON.parse(vaultJson) as Vault;
     } catch (error) {
-      throw new Error('Failed to decrypt vault: invalid signature or corrupted data');
-    } finally {
-      secureWipe(key);
+      throw new Error('Failed to decrypt vault: invalid password or corrupted data');
     }
   }
 
@@ -144,6 +184,7 @@ export class VaultStorage {
     credentialId: string;
     publicKey: string;
     algorithm: number;
+    passwordSalt: string;
   } | null> {
     if (!await this.exists()) {
       return null;
@@ -156,6 +197,7 @@ export class VaultStorage {
       credentialId: vaultFile.credentialId,
       publicKey: vaultFile.publicKey,
       algorithm: vaultFile.algorithm,
+      passwordSalt: vaultFile.passwordSalt,
     };
   }
 
@@ -173,11 +215,24 @@ export class VaultStorage {
   }
 
   /**
+   * Get password salt from vault file
+   */
+  async getPasswordSalt(): Promise<string | null> {
+    if (!await this.exists()) {
+      return null;
+    }
+
+    const fileContent = await fs.readFile(this.vaultPath, 'utf-8');
+    const vaultFile: VaultFile = JSON.parse(fileContent);
+    return vaultFile.passwordSalt;
+  }
+
+  /**
    * Update counter after successful authentication
    */
-  async updateCounter(newCounter: number, signature: Uint8Array): Promise<void> {
-    const vault = await this.load(signature);
+  async updateCounter(newCounter: number, vek: Uint8Array): Promise<void> {
+    const vault = await this.load(vek);
     vault.owner.counter = newCounter;
-    await this.save(vault, signature);
+    await this.save(vault, vek);
   }
 }

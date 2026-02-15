@@ -186,6 +186,11 @@
           </div>
         </div>
 
+        <div style="margin-bottom: 16px;">
+          <label style="display: block; margin-bottom: 6px; color: var(--text-dim); font-size: 14px;">Master Password</label>
+          <input type="password" id="master-password" class="host-input" placeholder="Enter master password">
+        </div>
+
         <button id="approve-btn" class="btn btn-primary">
           🔐 Approve with Passkey
         </button>
@@ -257,6 +262,9 @@
       btn.textContent = '🔐 Authenticating...';
 
       try {
+        const password = document.getElementById('master-password').value;
+        if (!password) { alert('Master password is required'); btn.disabled = false; btn.textContent = '🔐 Approve with Passkey'; return; }
+
         // WebAuthn authentication
         const credential = await navigator.credentials.get({
           publicKey: {
@@ -280,6 +288,7 @@
           body: JSON.stringify({
             webauthnChallengeId,
             vaultChallengeId: challengeId,
+            password,
             allowedHosts,  // Send edited hosts
             response: {
               id: credential.id,
