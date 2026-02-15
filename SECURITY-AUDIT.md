@@ -19,10 +19,10 @@ The audit identified **critical architectural flaws** that fundamentally undermi
 |----------|-------|
 | CRITICAL | 5 |
 | HIGH | 13 |
-| MEDIUM | 22 |
+| MEDIUM | 23 |
 | LOW | 7 |
 | INFORMATIONAL | 5 |
-| **TOTAL** | **52** |
+| **TOTAL** | **53** |
 
 ---
 
@@ -571,17 +571,17 @@ The `execute` method concatenates all stdout/stderr data into unbounded strings.
 
 ---
 
-### MEDIUM-19: Missing Input Validation on Host/Agent Management APIs
+### MEDIUM-19: SSH Credentials Held in Memory as Immutable Strings
 
-**File:** `src/vault/vault.ts`
+**File:** `src/ssh/executor.ts:41-53`, `src/vault/vault.ts`
 
-Decrypted vault data (including SSH private keys and passwords) remains in memory for the entire session lifetime (up to 30 minutes by default).
+Decrypted vault data (including SSH private keys and passwords) remains in memory for the entire session lifetime (up to 30 minutes). Credentials are passed as JavaScript strings which are immutable in V8 and cannot be securely wiped. The `getHosts()` method returns the full host array including credential field without stripping sensitive data.
 
-**Fix:** Decrypt credentials only when needed for execution; wipe immediately after use.
+**Fix:** Use Buffer objects for credentials where possible; zero them after SSH connection; strip credentials from `getHosts()` return value.
 
 ---
 
-### MEDIUM-21: Missing Input Validation on Host/Agent Management APIs
+### MEDIUM-20: Missing Input Validation on Host/Agent Management APIs
 
 **File:** `src/web/server.ts:457-549`
 
@@ -598,6 +598,24 @@ The `/api/manage/hosts` and `/api/manage/agents` endpoints accept arbitrary inpu
 The `showUnlockCode()` function injects server-provided unlock code directly into `innerHTML`. While the code is generated from a constrained charset server-side, the client trusts the response entirely. An MITM or compromised server could exploit this.
 
 **Fix:** Use `textContent` instead of `innerHTML` for the unlock code display.
+
+---
+
+### MEDIUM-23: Management API Over-Exposes Vault Data via Spread Operator
+
+**File:** `src/web/server.ts:446-448`
+
+The `/api/manage/data` endpoint uses spread operator to copy host objects, only redacting `credential`. This is a denylist approach -- any new fields added to Host will automatically be exposed. The `...h` copies `id`, `createdAt`, `updatedAt`, and all future fields without review.
+
+```typescript
+res.json({
+  hosts: vault.hosts.map(h => ({ ...h, credential: '***' })),
+  agents: vault.agents,  // All agent data exposed including allowedCommands details
+  sessions: [],
+});
+```
+
+**Fix:** Use an explicit allowlist of fields to return: `{ name: h.name, hostname: h.hostname, port: h.port, ... }`.
 
 ---
 
@@ -840,10 +858,11 @@ HIGH-01 (Nonce cleanup) + MEDIUM-13 (State lost on restart)
 | MEDIUM-16 | Validate CORS origin configuration | Low |
 | MEDIUM-17 | Add Host header validation for DNS rebinding | Low |
 | MEDIUM-18 | Cap SSH output buffer size (10MB) | Low |
-| MEDIUM-19 | Minimize credential time in memory | Medium |
-| MEDIUM-20 | SSH credentials held in memory too long | Medium |
-| MEDIUM-21 | Add Zod validation to management API inputs | Low |
+| MEDIUM-19 | Use Buffer for SSH credentials; wipe after use | Medium |
+| MEDIUM-20 | Add Zod validation to management API inputs | Low |
+| MEDIUM-21 | Fix unlock code DOM XSS (use textContent) | Low |
 | MEDIUM-22 | Fix unlock code DOM XSS (use textContent) | Low |
+| MEDIUM-23 | Use allowlist in management API data response | Low |
 
 ### Low Priority (P3) - Within 90 days
 
