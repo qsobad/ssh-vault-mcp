@@ -25,10 +25,13 @@ export interface AgentConfig {
   fingerprint: string;        // "SHA256:abc123..."
   name: string;               // "coding-agent"
   allowedHosts: string[];     // ["dev-*", "staging-*"]
-  allowedCommands: string[];  // ["ls", "cat", "grep"]
-  deniedCommands: string[];   // ["rm", "sudo"]
   createdAt: number;
   lastUsed: number;
+}
+
+export interface GlobalPolicy {
+  allowedCommands: string[];  // Global whitelist: ["ls", "cat", "grep", "pwd"]
+  deniedCommands: string[];   // Global blacklist: ["rm -rf", "mkfs", "dd if="]
 }
 
 export interface Session {
@@ -46,6 +49,7 @@ export interface Vault {
   owner: PasskeyCredential;
   hosts: Host[];
   agents: AgentConfig[];
+  policy: GlobalPolicy;
 }
 
 export interface VaultFile {
@@ -61,7 +65,7 @@ export interface VaultFile {
 
 export interface UnlockChallenge {
   id: string;
-  action: "unlock_vault" | "approve_command";
+  action: "unlock_vault" | "approve_command" | "register_agent";
   timestamp: number;
   nonce: string;
   expiresAt: number;
@@ -70,6 +74,14 @@ export interface UnlockChallenge {
   agent?: string;
   host?: string;
   commands?: string[];
+  
+  // For register_agent
+  agentRegistration?: {
+    name: string;
+    fingerprint: string;
+    publicKey: string;
+    requestedHosts: string[];
+  };
 }
 
 export interface Config {

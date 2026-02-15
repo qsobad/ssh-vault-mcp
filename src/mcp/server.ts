@@ -15,6 +15,7 @@ import type { Config } from '../types.js';
 import { VaultManager } from '../vault/vault.js';
 import { PolicyEngine } from '../policy/engine.js';
 import { SSHExecutor } from '../ssh/executor.js';
+import { verifySignedRequest, fingerprintFromPublicKey, type SignedRequest } from '../auth/agent.js';
 
 // Tool input schemas
 const SubmitUnlockSchema = z.object({
@@ -36,29 +37,55 @@ const ManageVaultSchema = z.object({
   data: z.record(z.unknown()).describe('Action-specific data'),
 });
 
+// Common signature properties for authenticated tools
+const SIGNATURE_PROPERTIES = {
+  signature: {
+    type: 'string',
+    description: 'Ed25519 signature of the payload (base64)',
+  },
+  publicKey: {
+    type: 'string',
+    description: 'Agent Ed25519 public key (base64)',
+  },
+  timestamp: {
+    type: 'number',
+    description: 'Request timestamp in milliseconds',
+  },
+  nonce: {
+    type: 'string',
+    description: 'Random nonce for replay protection (base64)',
+  },
+};
+
+const SIGNATURE_REQUIRED = ['signature', 'publicKey', 'timestamp', 'nonce'];
+
 // Tool definitions
 const TOOLS: Tool[] = [
   {
     name: 'vault_status',
-    description: 'Check if the SSH vault is locked or unlocked, and session status',
+    description: 'Check if the SSH vault is locked or unlocked, and session status. Requires signed request.',
     inputSchema: {
       type: 'object',
-      properties: {},
-      required: [],
+      properties: {
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: SIGNATURE_REQUIRED,
     },
   },
   {
     name: 'request_unlock',
-    description: 'Request to unlock the vault. Returns a URL for Passkey authentication.',
+    description: 'Request to unlock the vault. Returns a URL for Passkey authentication. Requires signed request.',
     inputSchema: {
       type: 'object',
-      properties: {},
-      required: [],
+      properties: {
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: SIGNATURE_REQUIRED,
     },
   },
   {
     name: 'submit_unlock',
-    description: 'Submit the unlock code obtained from the signing page',
+    description: 'Submit the unlock code obtained from the signing page. Requires signed request.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -66,13 +93,14 @@ const TOOLS: Tool[] = [
           type: 'string',
           description: 'The unlock code shown on the signing page after Passkey verification',
         },
+        ...SIGNATURE_PROPERTIES,
       },
-      required: ['unlock_code'],
+      required: ['unlock_code', ...SIGNATURE_REQUIRED],
     },
   },
   {
     name: 'list_hosts',
-    description: 'List available SSH hosts (requires unlocked vault)',
+    description: 'List available SSH hosts (requires unlocked vault). Requires signed request.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -80,13 +108,14 @@ const TOOLS: Tool[] = [
           type: 'string',
           description: 'Filter hosts by name pattern (supports wildcards like dev-*)',
         },
+        ...SIGNATURE_PROPERTIES,
       },
-      required: [],
+      required: SIGNATURE_REQUIRED,
     },
   },
   {
     name: 'execute_command',
-    description: 'Execute a command on an SSH host. May require approval for commands outside policy.',
+    description: 'Execute a command on an SSH host. May require approval for commands outside policy. Requires signed request.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -102,13 +131,14 @@ const TOOLS: Tool[] = [
           type: 'number',
           description: 'Command timeout in seconds (default: 30)',
         },
+        ...SIGNATURE_PROPERTIES,
       },
-      required: ['host', 'command'],
+      required: ['host', 'command', ...SIGNATURE_REQUIRED],
     },
   },
   {
     name: 'manage_vault',
-    description: 'Manage vault contents (add/remove hosts and agents). Requires Passkey confirmation.',
+    description: 'Manage vault contents (add/remove hosts and agents). Requires Passkey confirmation. Requires signed request.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -121,17 +151,52 @@ const TOOLS: Tool[] = [
           type: 'object',
           description: 'Action-specific data',
         },
+        ...SIGNATURE_PROPERTIES,
       },
-      required: ['action', 'data'],
+      required: ['action', 'data', ...SIGNATURE_REQUIRED],
     },
   },
   {
     name: 'revoke_session',
-    description: 'Revoke the current session and lock the vault',
+    description: 'Revoke the current session and lock the vault. Requires signed request.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: SIGNATURE_REQUIRED,
+    },
+  },
+  {
+    name: 'generate_keypair',
+    description: 'Generate a new Ed25519 keypair for agent authentication. Returns public key, private key, and fingerprint. Store the private key securely!',
     inputSchema: {
       type: 'object',
       properties: {},
       required: [],
+    },
+  },
+  {
+    name: 'register_agent',
+    description: 'Request to register a new agent. Returns a URL for user approval via Passkey. Does not require existing registration. Commands are controlled by global policy.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          description: 'Agent name (e.g., "coding-agent")',
+        },
+        publicKey: {
+          type: 'string',
+          description: 'Agent Ed25519 public key (base64)',
+        },
+        requestedHosts: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Requested host patterns (e.g., ["dev-*", "staging-*"])',
+        },
+      },
+      required: ['name', 'publicKey'],
     },
   },
 ];
@@ -142,18 +207,16 @@ export class MCPServer {
   private policyEngine: PolicyEngine;
   private sshExecutor: SSHExecutor;
   private config: Config;
-  private agentFingerprint: string;
 
   constructor(
     config: Config,
     vaultManager: VaultManager,
-    agentFingerprint: string
+    _agentFingerprint?: string  // Deprecated: fingerprint now derived from signed requests
   ) {
     this.config = config;
     this.vaultManager = vaultManager;
     this.policyEngine = new PolicyEngine();
     this.sshExecutor = new SSHExecutor();
-    this.agentFingerprint = agentFingerprint;
 
     this.server = new Server(
       { name: 'ssh-vault-mcp', version: '0.1.0' },
@@ -161,6 +224,35 @@ export class MCPServer {
     );
 
     this.setupHandlers();
+  }
+
+  /**
+   * Verify signed request and return agent fingerprint
+   * Throws if verification fails
+   */
+  private verifyAgentSignature(args: Record<string, unknown>): string {
+    // Check if signed request fields are present
+    if (!args.signature || !args.publicKey || !args.timestamp || !args.nonce) {
+      throw new Error('Missing signature fields. Requests must be signed with agent private key.');
+    }
+
+    // Extract payload (args without signature fields)
+    const { signature, publicKey, timestamp, nonce, ...payload } = args;
+
+    const signedRequest: SignedRequest = {
+      payload: JSON.stringify(payload),
+      signature: signature as string,
+      publicKey: publicKey as string,
+      timestamp: timestamp as number,
+      nonce: nonce as string,
+    };
+
+    const result = verifySignedRequest(signedRequest);
+    if (!result.valid) {
+      throw new Error(`Signature verification failed: ${result.error}`);
+    }
+
+    return result.fingerprint!;
   }
 
   private setupHandlers(): void {
@@ -172,37 +264,50 @@ export class MCPServer {
     // Call tool handler
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
+      const typedArgs = (args || {}) as Record<string, unknown>;
 
       try {
+        // Tools that don't require signature (not yet registered)
+        if (name === 'generate_keypair') {
+          return this.handleGenerateKeypair();
+        }
+        if (name === 'register_agent') {
+          return this.handleRegisterAgent(typedArgs);
+        }
+
+        // All other tools require signature verification
+        const fingerprint = this.verifyAgentSignature(typedArgs);
+
         switch (name) {
           case 'vault_status':
-            return this.handleVaultStatus();
+            return this.handleVaultStatus(fingerprint);
 
           case 'request_unlock':
-            return this.handleRequestUnlock();
+            return this.handleRequestUnlock(fingerprint);
 
           case 'submit_unlock':
-            const unlockArgs = SubmitUnlockSchema.parse(args);
-            return this.handleSubmitUnlock(unlockArgs.unlock_code);
+            const unlockArgs = SubmitUnlockSchema.parse(typedArgs);
+            return this.handleSubmitUnlock(unlockArgs.unlock_code, fingerprint);
 
           case 'list_hosts':
-            const listArgs = ListHostsSchema.parse(args);
-            return this.handleListHosts(listArgs.filter);
+            const listArgs = ListHostsSchema.parse(typedArgs);
+            return this.handleListHosts(listArgs.filter, fingerprint);
 
           case 'execute_command':
-            const execArgs = ExecuteCommandSchema.parse(args);
+            const execArgs = ExecuteCommandSchema.parse(typedArgs);
             return this.handleExecuteCommand(
               execArgs.host,
               execArgs.command,
-              execArgs.timeout
+              execArgs.timeout,
+              fingerprint
             );
 
           case 'manage_vault':
-            const manageArgs = ManageVaultSchema.parse(args);
-            return this.handleManageVault(manageArgs.action, manageArgs.data);
+            const manageArgs = ManageVaultSchema.parse(typedArgs);
+            return this.handleManageVault(manageArgs.action, manageArgs.data, fingerprint);
 
           case 'revoke_session':
-            return this.handleRevokeSession();
+            return this.handleRevokeSession(fingerprint);
 
           default:
             return {
@@ -220,14 +325,100 @@ export class MCPServer {
     });
   }
 
-  private handleVaultStatus() {
-    const session = this.vaultManager.getSessionByAgent(this.agentFingerprint);
+  private handleGenerateKeypair() {
+    const { generateAgentKeypair } = require('../auth/agent.js');
+    const keypair = generateAgentKeypair();
+    
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          publicKey: keypair.publicKey,
+          privateKey: keypair.privateKey,
+          fingerprint: keypair.fingerprint,
+          warning: 'Store the private key securely! It cannot be recovered.',
+        }, null, 2),
+      }],
+    };
+  }
+
+  private handleRegisterAgent(args: Record<string, unknown>) {
+    const name = args.name as string;
+    const publicKey = args.publicKey as string;
+    const requestedHosts = (args.requestedHosts as string[]) || ['*'];
+
+    // Validate public key and compute fingerprint
+    let fingerprint: string;
+    try {
+      fingerprint = fingerprintFromPublicKey(publicKey);
+    } catch {
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            error: 'Invalid public key format',
+          }, null, 2),
+        }],
+        isError: true,
+      };
+    }
+
+    // Check if agent already registered (only if vault is unlocked)
+    try {
+      const existingAgent = this.vaultManager.getAgent(fingerprint);
+      if (existingAgent) {
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              error: 'Agent already registered',
+              fingerprint,
+              name: existingAgent.name,
+            }, null, 2),
+          }],
+          isError: true,
+        };
+      }
+    } catch {
+      // Vault locked, proceed with registration
+    }
+
+    // Create registration challenge
+    const { approvalUrl, listenUrl, challengeId, expiresAt } = this.vaultManager.createAgentRegistrationChallenge(
+      this.config.web.externalUrl,
+      {
+        name,
+        fingerprint,
+        publicKey,
+        requestedHosts,
+      }
+    );
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          status: 'pending_approval',
+          fingerprint,
+          approvalUrl,
+          listenUrl,
+          challengeId,
+          expiresAt,
+          message: 'Registration requires user approval. Commands are controlled by global policy.',
+        }, null, 2),
+      }],
+    };
+  }
+
+  private handleVaultStatus(fingerprint: string) {
+    const session = this.vaultManager.getSessionByAgent(fingerprint);
     
     return {
       content: [{
         type: 'text',
         text: JSON.stringify({
           locked: !this.vaultManager.isUnlocked(),
+          agentFingerprint: fingerprint,
           sessionId: session?.id,
           sessionExpires: session?.expiresAt,
         }, null, 2),
@@ -235,9 +426,9 @@ export class MCPServer {
     };
   }
 
-  private async handleRequestUnlock() {
+  private async handleRequestUnlock(fingerprint: string) {
     if (this.vaultManager.isUnlocked()) {
-      const session = this.vaultManager.getSessionByAgent(this.agentFingerprint);
+      const session = this.vaultManager.getSessionByAgent(fingerprint);
       if (session) {
         return {
           content: [{
@@ -254,7 +445,7 @@ export class MCPServer {
 
     const { challengeId, unlockUrl, listenUrl, expiresAt } = this.vaultManager.createUnlockChallenge(
       this.config.web.externalUrl,
-      this.agentFingerprint
+      fingerprint
     );
 
     return {
@@ -272,10 +463,10 @@ export class MCPServer {
     };
   }
 
-  private async handleSubmitUnlock(unlockCode: string) {
+  private async handleSubmitUnlock(unlockCode: string, fingerprint: string) {
     const result = await this.vaultManager.submitUnlockCode(
       unlockCode,
-      this.agentFingerprint
+      fingerprint
     );
 
     return {
@@ -286,7 +477,7 @@ export class MCPServer {
     };
   }
 
-  private handleListHosts(filter?: string) {
+  private handleListHosts(filter: string | undefined, _fingerprint: string) {
     if (!this.vaultManager.isUnlocked()) {
       return {
         content: [{
@@ -328,7 +519,8 @@ export class MCPServer {
   private async handleExecuteCommand(
     hostName: string,
     command: string,
-    timeout: number
+    timeout: number,
+    fingerprint: string
   ) {
     if (!this.vaultManager.isUnlocked()) {
       return {
@@ -353,26 +545,28 @@ export class MCPServer {
       };
     }
 
-    const agent = this.vaultManager.getAgent(this.agentFingerprint);
+    const agent = this.vaultManager.getAgent(fingerprint);
     if (!agent) {
       return {
         content: [{
           type: 'text',
           text: JSON.stringify({
-            error: 'Agent not registered in vault',
+            error: `Agent not registered in vault. Fingerprint: ${fingerprint}`,
           }, null, 2),
         }],
         isError: true,
       };
     }
 
-    const session = this.vaultManager.getSessionByAgent(this.agentFingerprint);
+    const session = this.vaultManager.getSessionByAgent(fingerprint);
+    const policy = this.vaultManager.getPolicy();
 
     // Check policy
     const policyResult = this.policyEngine.checkCommand(
       agent,
       host.name,
       command,
+      policy,
       session || undefined
     );
 
@@ -380,7 +574,7 @@ export class MCPServer {
       // Need approval
       const { approvalUrl, listenUrl, challengeId, expiresAt } = this.vaultManager.createApprovalChallenge(
         this.config.web.externalUrl,
-        this.agentFingerprint,
+        fingerprint,
         host.name,
         [command]
       );
@@ -444,11 +638,11 @@ export class MCPServer {
     }
   }
 
-  private handleManageVault(action: string, _data: Record<string, unknown>) {
+  private handleManageVault(action: string, _data: Record<string, unknown>, fingerprint: string) {
     // All vault management requires Passkey approval
     const { approvalUrl, listenUrl, challengeId, expiresAt } = this.vaultManager.createApprovalChallenge(
       this.config.web.externalUrl,
-      this.agentFingerprint,
+      fingerprint,
       '*',
       [`manage_vault:${action}`]
     );
@@ -469,8 +663,8 @@ export class MCPServer {
     };
   }
 
-  private handleRevokeSession() {
-    const session = this.vaultManager.getSessionByAgent(this.agentFingerprint);
+  private handleRevokeSession(fingerprint: string) {
+    const session = this.vaultManager.getSessionByAgent(fingerprint);
     
     if (session) {
       this.vaultManager.revokeSession(session.id);

@@ -4,7 +4,7 @@
  */
 
 import { minimatch } from 'minimatch';
-import type { AgentConfig, Session } from '../types.js';
+import type { AgentConfig, Session, GlobalPolicy } from '../types.js';
 
 export interface PolicyCheckResult {
   allowed: boolean;
@@ -36,11 +36,13 @@ export class PolicyEngine {
 
   /**
    * Check if a command is allowed for an agent on a host
+   * Uses global policy for command whitelist/blacklist
    */
   checkCommand(
     agent: AgentConfig,
     hostName: string,
     command: string,
+    policy: GlobalPolicy,
     session?: Session
   ): PolicyCheckResult {
     // First check host access
@@ -52,12 +54,12 @@ export class PolicyEngine {
     // Extract the base command (first word)
     const baseCommand = this.extractBaseCommand(command);
 
-    // Check denied commands first (explicit deny takes precedence)
-    for (const pattern of agent.deniedCommands) {
+    // Check global denied commands first (explicit deny takes precedence)
+    for (const pattern of policy.deniedCommands) {
       if (this.commandMatches(command, baseCommand, pattern)) {
         return {
           allowed: false,
-          reason: `Command denied by rule: ${pattern}`,
+          reason: `Command denied by global policy: ${pattern}`,
           matchedRule: pattern,
         };
       }
@@ -77,8 +79,8 @@ export class PolicyEngine {
       }
     }
 
-    // Check allowed commands
-    if (agent.allowedCommands.length === 0) {
+    // Check global allowed commands
+    if (policy.allowedCommands.length === 0) {
       // No allowed commands specified = all commands need approval
       return {
         allowed: false,
@@ -86,11 +88,11 @@ export class PolicyEngine {
       };
     }
 
-    for (const pattern of agent.allowedCommands) {
+    for (const pattern of policy.allowedCommands) {
       if (this.commandMatches(command, baseCommand, pattern)) {
         return {
           allowed: true,
-          reason: 'Command matches allowed pattern',
+          reason: 'Command allowed by global policy',
           matchedRule: pattern,
         };
       }
@@ -98,7 +100,7 @@ export class PolicyEngine {
 
     return {
       allowed: false,
-      reason: `Command '${baseCommand}' not in allowed commands`,
+      reason: `Command '${baseCommand}' not in global allowed commands`,
     };
   }
 
@@ -213,13 +215,31 @@ export class PolicyEngine {
       warnings.push('Agent has access to all hosts');
     }
 
-    if (config.allowedCommands.includes('*')) {
-      warnings.push('Agent can execute any command');
+    return {
+      valid: errors.length === 0,
+      errors,
+      warnings,
+    };
+  }
+
+  /**
+   * Validate global policy
+   */
+  validatePolicy(policy: GlobalPolicy): {
+    valid: boolean;
+    errors: string[];
+    warnings: string[];
+  } {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+
+    if (policy.allowedCommands.includes('*')) {
+      warnings.push('Policy allows all commands');
     }
 
     // Check for conflicting rules
-    for (const allowed of config.allowedCommands) {
-      for (const denied of config.deniedCommands) {
+    for (const allowed of policy.allowedCommands) {
+      for (const denied of policy.deniedCommands) {
         if (allowed === denied) {
           errors.push(`Command "${allowed}" is both allowed and denied`);
         }

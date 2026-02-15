@@ -4,7 +4,7 @@
  */
 
 import { randomUUID } from 'crypto';
-import type { Vault, Host, AgentConfig, Session, UnlockChallenge, PasskeyCredential } from '../types.js';
+import type { Vault, Host, AgentConfig, Session, UnlockChallenge, PasskeyCredential, GlobalPolicy } from '../types.js';
 import { VaultStorage } from './storage.js';
 import { generateRandomId, generateUnlockCode, secureWipe, initSodium } from './encryption.js';
 
@@ -21,6 +21,7 @@ type ChallengeEventListener = (event: {
   challengeId: string;
   sessionId?: string;
   error?: string;
+  agentRegistered?: boolean;
 }) => void;
 
 export class VaultManager {
@@ -168,6 +169,48 @@ export class VaultManager {
   }
 
   /**
+   * Create an agent registration challenge (requires user approval)
+   */
+  createAgentRegistrationChallenge(
+    baseUrl: string,
+    agentInfo: {
+      name: string;
+      fingerprint: string;
+      publicKey: string;
+      requestedHosts: string[];
+    }
+  ): {
+    challengeId: string;
+    approvalUrl: string;
+    listenUrl: string;
+    expiresAt: number;
+  } {
+    const challenge: UnlockChallenge = {
+      id: generateRandomId(),
+      action: 'register_agent',
+      timestamp: Date.now(),
+      nonce: generateRandomId(),
+      expiresAt: Date.now() + this.challengeTimeoutMs,
+      agentRegistration: agentInfo,
+    };
+
+    const unlockCode = generateUnlockCode();
+    
+    this.pendingChallenges.set(challenge.id, {
+      challenge,
+      unlockCode,
+      agentFingerprint: agentInfo.fingerprint,
+    });
+
+    return {
+      challengeId: challenge.id,
+      approvalUrl: `${baseUrl}/register-agent?challenge=${challenge.id}`,
+      listenUrl: `${baseUrl}/api/challenge/${challenge.id}/listen`,
+      expiresAt: challenge.expiresAt,
+    };
+  }
+
+  /**
    * Get challenge details for the signing page
    */
   getChallenge(challengeId: string): UnlockChallenge | null {
@@ -176,6 +219,21 @@ export class VaultManager {
       return null;
     }
     return pending.challenge;
+  }
+
+  /**
+   * Update allowed hosts in a registration challenge (user can edit before approving)
+   */
+  updateChallengeHosts(challengeId: string, allowedHosts: string[]): boolean {
+    const pending = this.pendingChallenges.get(challengeId);
+    if (!pending || pending.challenge.expiresAt < Date.now()) {
+      return false;
+    }
+    if (pending.challenge.action === 'register_agent' && pending.challenge.agentRegistration) {
+      pending.challenge.agentRegistration.requestedHosts = allowedHosts;
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -297,6 +355,56 @@ export class VaultManager {
           type: 'approved',
           challengeId: foundId,
           sessionId: session.id,
+        });
+        
+        // Cleanup
+        this.pendingChallenges.delete(foundId);
+        this.challengeListeners.delete(foundId);
+        
+        return {
+          success: true,
+          sessionId: session.id,
+          expiresAt: session.expiresAt,
+        };
+      } else if (foundChallenge.challenge.action === 'register_agent') {
+        // Register new agent
+        const reg = foundChallenge.challenge.agentRegistration!;
+        
+        // Load vault with signature to modify it
+        if (!this.vault) {
+          this.vault = await this.storage.load(foundChallenge.signature);
+          this.currentSignature = new Uint8Array(foundChallenge.signature);
+        }
+        
+        // Check if agent already exists
+        const existing = this.vault.agents.find(a => a.fingerprint === reg.fingerprint);
+        if (existing) {
+          return { success: false, error: 'Agent already registered' };
+        }
+        
+        // Add new agent
+        const newAgent: AgentConfig = {
+          fingerprint: reg.fingerprint,
+          name: reg.name,
+          allowedHosts: reg.requestedHosts,
+          createdAt: Date.now(),
+          lastUsed: Date.now(),
+        };
+        
+        this.vault.agents.push(newAgent);
+        
+        // Save vault
+        await this.storage.save(this.vault, this.currentSignature!);
+        
+        // Create session for the new agent
+        const session = this.createSession(reg.fingerprint);
+        
+        // Emit event to listeners
+        this.emitChallengeEvent(foundId, {
+          type: 'approved',
+          challengeId: foundId,
+          sessionId: session.id,
+          agentRegistered: true,
         });
         
         // Cleanup
@@ -445,6 +553,16 @@ export class VaultManager {
       throw new Error('Vault is locked');
     }
     return this.vault.agents.find(a => a.fingerprint === fingerprint) ?? null;
+  }
+
+  /**
+   * Get global policy
+   */
+  getPolicy(): GlobalPolicy {
+    if (!this.vault) {
+      throw new Error('Vault is locked');
+    }
+    return this.vault.policy;
   }
 
   /**

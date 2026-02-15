@@ -70,10 +70,11 @@ export class WebServer {
     });
 
     // Check vault status
-    this.app.get('/api/vault/status', (_req: Request, res: Response) => {
+    this.app.get('/api/vault/status', async (_req: Request, res: Response) => {
+      const exists = await this.vaultManager.vaultExists();
       res.json({
         locked: !this.vaultManager.isUnlocked(),
-        vaultExists: true, // If we get here, vault exists
+        vaultExists: exists,
       });
     });
 
@@ -86,11 +87,14 @@ export class WebServer {
       }
 
       res.json({
-        action: challenge.action,
-        host: challenge.host,
-        commands: challenge.commands,
-        agent: challenge.agent,
-        expiresAt: challenge.expiresAt,
+        challenge: {
+          action: challenge.action,
+          host: challenge.host,
+          commands: challenge.commands,
+          agent: challenge.agent,
+          agentRegistration: challenge.agentRegistration,
+          expiresAt: challenge.expiresAt,
+        },
       });
     });
 
@@ -142,14 +146,85 @@ export class WebServer {
         // Create vault with the credential and VEK
         await this.vaultManager.createVault(result.credential, vek);
 
+        // Create management session so user doesn't need to auth again
+        const token = crypto.randomUUID();
+        manageSessions.set(token, {
+          expiresAt: Date.now() + 30 * 60 * 1000, // 30 minutes
+          vek,
+        });
+
         res.json({ 
           success: true, 
           message: 'Registration successful. Vault created.',
           credentialId: result.credential.id,
+          token,  // Return session token
         });
       } catch (error) {
         res.status(500).json({ 
           error: error instanceof Error ? error.message : 'Verification failed' 
+        });
+      }
+    });
+
+    // Agent registration endpoint (REST API for MCP-less testing)
+    this.app.post('/api/agent/register', async (req: Request, res: Response) => {
+      try {
+        const { name, publicKey, requestedHosts } = req.body;
+        
+        if (!name || !publicKey) {
+          res.status(400).json({ error: 'name and publicKey required' });
+          return;
+        }
+
+        // Import fingerprint function
+        const { fingerprintFromPublicKey } = await import('../auth/agent.js');
+        
+        let fingerprint: string;
+        try {
+          fingerprint = fingerprintFromPublicKey(publicKey);
+        } catch {
+          res.status(400).json({ error: 'Invalid public key format' });
+          return;
+        }
+
+        // Check if agent already exists (only if vault is unlocked)
+        try {
+          const existingAgent = this.vaultManager.getAgent(fingerprint);
+          if (existingAgent) {
+            res.status(409).json({ 
+              error: 'Agent already registered',
+              fingerprint,
+              name: existingAgent.name,
+            });
+            return;
+          }
+        } catch {
+          // Vault is locked, can't check - proceed with registration
+        }
+
+        // Create registration challenge
+        const result = this.vaultManager.createAgentRegistrationChallenge(
+          this.config.web.externalUrl,
+          {
+            name,
+            fingerprint,
+            publicKey,
+            requestedHosts: requestedHosts || ['*'],
+          }
+        );
+
+        res.json({
+          status: 'pending_approval',
+          fingerprint,
+          approvalUrl: result.approvalUrl,
+          listenUrl: result.listenUrl,
+          challengeId: result.challengeId,
+          expiresAt: result.expiresAt,
+          note: 'Commands are controlled by global policy, not per-agent.',
+        });
+      } catch (error) {
+        res.status(500).json({ 
+          error: error instanceof Error ? error.message : 'Registration failed' 
         });
       }
     });
@@ -177,13 +252,18 @@ export class WebServer {
 
     this.app.post('/api/auth/verify', async (req: Request, res: Response) => {
       try {
-        const { webauthnChallengeId, vaultChallengeId, response } = req.body;
+        const { webauthnChallengeId, vaultChallengeId, response, allowedHosts } = req.body;
         
         if (!webauthnChallengeId || !vaultChallengeId || !response) {
           res.status(400).json({ 
             error: 'webauthnChallengeId, vaultChallengeId, and response required' 
           });
           return;
+        }
+
+        // If allowedHosts is provided, update the challenge before completing
+        if (allowedHosts && Array.isArray(allowedHosts)) {
+          this.vaultManager.updateChallengeHosts(vaultChallengeId, allowedHosts);
         }
 
         // Get vault metadata for credential
@@ -296,17 +376,248 @@ export class WebServer {
       }
     });
 
+    // Management API endpoints
+    const manageSessions = new Map<string, { expiresAt: number; vek: Uint8Array }>();
+
+    // Check if management session is valid
+    this.app.get('/api/manage/check', (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      if (token && manageSessions.has(token)) {
+        const session = manageSessions.get(token)!;
+        if (session.expiresAt > Date.now()) {
+          res.json({ authenticated: true });
+          return;
+        }
+        manageSessions.delete(token);
+      }
+      res.json({ authenticated: false });
+    });
+
+    // Authenticate for management
+    this.app.post('/api/manage/auth', async (req: Request, res: Response) => {
+      try {
+        const { challengeId, response } = req.body;
+        
+        const metadata = await this.vaultManager.getMetadata();
+        if (!metadata) {
+          res.status(404).json({ error: 'No vault found' });
+          return;
+        }
+
+        const result = await this.webauthn.verifyAuthentication(
+          challengeId,
+          response,
+          {
+            id: metadata.credentialId,
+            publicKey: metadata.publicKey,
+            algorithm: metadata.algorithm,
+            counter: 0,
+            createdAt: 0,
+          }
+        );
+
+        if (!result.success) {
+          res.status(401).json({ error: result.error || 'Auth failed' });
+          return;
+        }
+
+        // Derive VEK and create management session
+        const { deriveKeyFromSignature } = await import('../vault/encryption.js');
+        const serverSecret = new TextEncoder().encode('ssh-vault-server-secret-' + metadata.credentialId);
+        const salt = new TextEncoder().encode('ssh-vault-static-salt');
+        const vek = deriveKeyFromSignature(serverSecret, salt.slice(0, 16));
+
+        const token = crypto.randomUUID();
+        manageSessions.set(token, {
+          expiresAt: Date.now() + 30 * 60 * 1000, // 30 minutes
+          vek,
+        });
+
+        res.json({ success: true, token });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Auth failed' });
+      }
+    });
+
+    // Get vault data
+    this.app.get('/api/manage/data', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      try {
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, false);
+        const vault = await storage.load(session.vek);
+
+        res.json({
+          hosts: vault.hosts.map(h => ({ ...h, credential: '***' })), // Hide credentials
+          agents: vault.agents,
+          sessions: [], // TODO: get from vault manager
+        });
+      } catch (error) {
+        res.status(500).json({ error: 'Failed to load vault' });
+      }
+    });
+
+    // Add host
+    this.app.post('/api/manage/hosts', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      try {
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, true);
+        const vault = await storage.load(session.vek);
+
+        const newHost = {
+          id: crypto.randomUUID(),
+          name: req.body.name,
+          hostname: req.body.hostname,
+          port: req.body.port || 22,
+          username: req.body.username,
+          authType: req.body.authType || 'key',
+          credential: req.body.credential || '',
+          tags: req.body.tags || [],
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+
+        vault.hosts.push(newHost);
+        await storage.save(vault, session.vek);
+
+        res.json({ success: true, host: { ...newHost, credential: '***' } });
+      } catch (error) {
+        res.status(500).json({ error: 'Failed to add host' });
+      }
+    });
+
+    // Delete host
+    this.app.delete('/api/manage/hosts/:id', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      try {
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, true);
+        const vault = await storage.load(session.vek);
+
+        vault.hosts = vault.hosts.filter(h => h.id !== req.params.id);
+        await storage.save(vault, session.vek);
+
+        res.json({ success: true });
+      } catch (error) {
+        res.status(500).json({ error: 'Failed to delete host' });
+      }
+    });
+
+    // Add agent
+    this.app.post('/api/manage/agents', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      try {
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, true);
+        const vault = await storage.load(session.vek);
+
+        const newAgent = {
+          fingerprint: req.body.fingerprint,
+          name: req.body.name,
+          allowedHosts: req.body.allowedHosts || [],
+          allowedCommands: req.body.allowedCommands || [],
+          deniedCommands: req.body.deniedCommands || [],
+          createdAt: Date.now(),
+          lastUsed: Date.now(),
+        };
+
+        vault.agents.push(newAgent);
+        await storage.save(vault, session.vek);
+
+        res.json({ success: true, agent: newAgent });
+      } catch (error) {
+        res.status(500).json({ error: 'Failed to add agent' });
+      }
+    });
+
+    // Delete agent
+    this.app.delete('/api/manage/agents/:fingerprint', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      try {
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, true);
+        const vault = await storage.load(session.vek);
+
+        vault.agents = vault.agents.filter(a => a.fingerprint !== req.params.fingerprint);
+        await storage.save(vault, session.vek);
+
+        res.json({ success: true });
+      } catch (error) {
+        res.status(500).json({ error: 'Failed to delete agent' });
+      }
+    });
+
+    // Lock vault (clear management session)
+    this.app.post('/api/manage/lock', (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      if (token) {
+        manageSessions.delete(token);
+      }
+      res.json({ success: true });
+    });
+
+    // Main page - serve manage
+    this.app.get('/', (_req: Request, res: Response) => {
+      res.sendFile(path.join(__dirname, '../../web/manage.html'));
+    });
+
     // Serve signing page
     this.app.get('/sign', (_req: Request, res: Response) => {
-      res.sendFile(path.join(__dirname, '../../web/index.html'));
+      res.sendFile(path.join(__dirname, '../../web/auth.html'));
     });
 
     this.app.get('/approve', (_req: Request, res: Response) => {
-      res.sendFile(path.join(__dirname, '../../web/index.html'));
+      res.sendFile(path.join(__dirname, '../../web/auth.html'));
     });
 
     this.app.get('/setup', (_req: Request, res: Response) => {
-      res.sendFile(path.join(__dirname, '../../web/index.html'));
+      res.sendFile(path.join(__dirname, '../../web/auth.html'));
+    });
+
+    // Management UI
+    this.app.get('/manage', (_req: Request, res: Response) => {
+      res.sendFile(path.join(__dirname, '../../web/manage.html'));
+    });
+
+    // Agent registration approval UI
+    this.app.get('/register-agent', (_req: Request, res: Response) => {
+      res.sendFile(path.join(__dirname, '../../web/register-agent.html'));
     });
   }
 
