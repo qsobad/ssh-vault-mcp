@@ -47,17 +47,26 @@ export interface Session {
 export interface Vault {
   version: 1;
   owner: PasskeyCredential;
+  credentials: PasskeyCredential[];  // All registered passkeys (includes owner)
   hosts: Host[];
   agents: AgentConfig[];
   policy: GlobalPolicy;
 }
 
+export interface VaultFileCredential {
+  id: string;
+  publicKey: string;
+  algorithm: number;
+  counter: number;
+}
+
 export interface VaultFile {
   version: 1;
-  credentialId: string;       // Passkey ID (base64)
+  credentialId: string;       // Primary Passkey ID (base64) - backward compat
   publicKey: string;          // For signature verification (base64)
   algorithm: number;
   counter: number;
+  credentials?: VaultFileCredential[];  // All registered passkeys
   passwordSalt: string;       // For password-based key derivation (base64)
   salt: string;               // For encryption key derivation (base64)
   nonce: string;              // For encryption (base64)

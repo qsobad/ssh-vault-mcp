@@ -136,12 +136,13 @@ export class VaultManager {
     credentialId: string;
     publicKey: string;
     algorithm: number;
+    credentials: import('../types.js').VaultFileCredential[];
   } | null> {
     return this.storage.getMetadata();
   }
 
   /**
-   * Get vault metadata including passwordSalt and kdfParams.
+   * Get vault metadata including passwordSalt, kdfParams, and credentials.
    * Only call AFTER authenticating the caller (e.g., after WebAuthn verification).
    */
   async getAuthMetadata(): Promise<{
@@ -150,6 +151,7 @@ export class VaultManager {
     algorithm: number;
     passwordSalt: string;
     kdfParams: { t: number; m: number; p: number; dkLen: number };
+    credentials: import('../types.js').VaultFileCredential[];
   } | null> {
     return this.storage.getAuthMetadata();
   }

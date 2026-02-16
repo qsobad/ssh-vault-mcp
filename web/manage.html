@@ -208,6 +208,21 @@
       <button class="btn btn-primary" id="retryBtn" onclick="location.reload()" style="width: 100%; padding: 14px; margin-top: 12px; display: none;">
         🔄 Retry
       </button>
+      <div style="margin-top: 16px;">
+        <a href="#" id="resetPasskeyLink" onclick="showResetPasskeyForm(); return false;" style="color: var(--text-dim); font-size: 13px;">Lost Passkey? Reset with Master Password</a>
+      </div>
+      <!-- Reset Passkey Form (hidden by default) -->
+      <div id="resetPasskeyForm" style="display: none; margin-top: 16px; text-align: left;">
+        <div class="form-group">
+          <label style="color: var(--text-dim);">Master Password</label>
+          <input type="password" id="resetPassword" placeholder="Enter master password" style="width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px;">
+        </div>
+        <button class="btn btn-primary" onclick="doResetPasskey()" style="width: 100%; padding: 14px;">
+          🔑 Reset & Register New Passkey
+        </button>
+        <div id="resetError" style="color: var(--error); margin-top: 8px; display: none;"></div>
+        <div id="resetSuccess" style="color: var(--success); margin-top: 8px; display: none;"></div>
+      </div>
     </div>
   </div>
 
@@ -221,6 +236,8 @@
       <div class="tab active" onclick="showTab('hosts')">🖥️ Hosts</div>
       <div class="tab" onclick="showTab('agents')">🤖 Agents</div>
       <div class="tab" onclick="showTab('sessions')">🔑 Sessions</div>
+      <div class="tab" onclick="showTab('passkeys')">🔐 Passkeys</div>
+      <div class="tab" onclick="showTab('policy')">⚙️ Policy</div>
     </div>
 
     <!-- Hosts Tab -->
@@ -296,6 +313,59 @@
         <div class="empty-state" id="sessionsEmpty" style="display: none;">
           No active sessions.
         </div>
+      </div>
+    </div>
+
+    <!-- Passkeys Tab -->
+    <div id="passkeys-tab" class="tab-content" style="display: none;">
+      <div class="card">
+        <div class="card-header">
+          <h2>Registered Passkeys</h2>
+          <button class="btn btn-primary" onclick="registerAdditionalPasskey()">+ Add Passkey</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Credential ID</th>
+              <th>Created</th>
+              <th>Sign Count</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="passkeysTable"></tbody>
+        </table>
+        <div class="empty-state" id="passkeysEmpty" style="display: none;">
+          No passkeys registered.
+        </div>
+      </div>
+    </div>
+
+    <!-- Policy Tab -->
+    <div id="policy-tab" class="tab-content" style="display: none;">
+      <div class="card">
+        <div class="card-header">
+          <h2>Global Command Policy</h2>
+        </div>
+        <div style="margin-bottom: 24px;">
+          <h3 style="font-size: 15px; margin-bottom: 8px;">✅ Allowed Commands (Whitelist)</h3>
+          <p style="font-size: 12px; color: var(--text-dim); margin-bottom: 12px;">If set, only these commands are permitted. Leave empty to allow all (except denied).</p>
+          <div id="allowedCommandsTags" style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px;"></div>
+          <div style="display: flex; gap: 8px;">
+            <input type="text" id="allowedCommandInput" placeholder="e.g. ls, cat, grep" style="flex: 1; padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px;">
+            <button class="btn btn-primary btn-sm" onclick="addPolicyCommand('allowed')">Add</button>
+          </div>
+        </div>
+        <div style="margin-bottom: 24px;">
+          <h3 style="font-size: 15px; margin-bottom: 8px;">🚫 Denied Commands (Blacklist)</h3>
+          <p style="font-size: 12px; color: var(--text-dim); margin-bottom: 12px;">These commands are always blocked, even if in the whitelist.</p>
+          <div id="deniedCommandsTags" style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px;"></div>
+          <div style="display: flex; gap: 8px;">
+            <input type="text" id="deniedCommandInput" placeholder="e.g. rm -rf, mkfs, dd if=" style="flex: 1; padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px;">
+            <button class="btn btn-primary btn-sm" onclick="addPolicyCommand('denied')">Add</button>
+          </div>
+        </div>
+        <button class="btn btn-primary" onclick="savePolicy()" style="width: 100%;">💾 Save Policy</button>
+        <div id="policySaveStatus" style="text-align: center; margin-top: 12px; font-size: 13px; display: none;"></div>
       </div>
     </div>
   </div>
@@ -432,7 +502,7 @@
   </div>
 
   <script>
-    let sessionToken = null;
+    let sessionToken = sessionStorage.getItem('vaultToken');
     let vaultData = { hosts: [], agents: [], sessions: [] };
 
     let vaultExists = false;
@@ -450,6 +520,24 @@
         const status = await statusRes.json();
         vaultExists = status.vaultExists;
         
+        // Try restoring session from sessionStorage
+        if (sessionToken && vaultExists) {
+          try {
+            const testRes = await fetch('/api/manage/data', {
+              headers: { 'Authorization': `Bearer ${sessionToken}` }
+            });
+            if (testRes.ok) {
+              document.getElementById('authOverlay').classList.add('hidden');
+              loadVaultData();
+              loadPasskeys();
+              return;
+            }
+          } catch (_) {}
+          // Token invalid, clear it
+          sessionToken = null;
+          sessionStorage.removeItem('vaultToken');
+        }
+
         if (!vaultExists) {
           document.getElementById('authStatus').textContent = 'Set a master password and create Passkey';
           document.getElementById('authBtn').textContent = '➕ Create Passkey';
@@ -525,8 +613,10 @@
 
       if (result.token) {
         sessionToken = result.token;
+        sessionStorage.setItem('vaultToken', result.token);
         document.getElementById('authOverlay').classList.add('hidden');
         loadVaultData();
+        loadPasskeys();
       } else {
         throw new Error('No session token returned');
       }
@@ -577,8 +667,10 @@
         const result = await verifyRes.json();
         if (result.success) {
           sessionToken = result.token;
+          sessionStorage.setItem('vaultToken', result.token);
           document.getElementById('authOverlay').classList.add('hidden');
           loadVaultData();
+          loadPasskeys();
         } else {
           throw new Error(result.error || 'Auth failed');
         }
@@ -600,6 +692,7 @@
           renderHosts();
           renderAgents();
           renderSessions();
+          renderPolicy();
         }
       } catch (e) {
         console.error('Failed to load vault data:', e);
@@ -876,6 +969,232 @@
       let binary = '';
       for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
       return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    }
+
+    // Passkey management
+    async function loadPasskeys() {
+      try {
+        const res = await fetch('/api/manage/passkeys', {
+          headers: { 'Authorization': `Bearer ${sessionToken}` }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          renderPasskeys(data.credentials);
+        }
+      } catch (e) { console.error('Failed to load passkeys:', e); }
+    }
+
+    function renderPasskeys(credentials) {
+      const tbody = document.getElementById('passkeysTable');
+      const empty = document.getElementById('passkeysEmpty');
+      if (!credentials || credentials.length === 0) {
+        tbody.innerHTML = '';
+        empty.style.display = 'block';
+        return;
+      }
+      empty.style.display = 'none';
+      tbody.innerHTML = credentials.map((c, i) => `
+        <tr>
+          <td style="font-family: monospace; font-size: 12px;">${escapeHtml(c.id.substring(0, 24))}...</td>
+          <td>${new Date(c.createdAt).toLocaleString()}</td>
+          <td>${c.counter}</td>
+          <td>
+            ${credentials.length > 1 ? `<button class="btn btn-danger btn-sm" onclick="deletePasskey('${escapeHtml(c.id)}')">Delete</button>` : '<span style="color: var(--text-dim); font-size: 12px;">Primary</span>'}
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    async function registerAdditionalPasskey() {
+      try {
+        const optRes = await fetch('/api/manage/passkeys/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` }
+        });
+        if (!optRes.ok) throw new Error('Failed to get registration options');
+        const { options, challengeId } = await optRes.json();
+
+        const credential = await navigator.credentials.create({
+          publicKey: {
+            ...options,
+            challenge: base64ToBuffer(options.challenge),
+            user: { ...options.user, id: base64ToBuffer(options.user.id) },
+          },
+        });
+
+        const verifyRes = await fetch('/api/manage/passkeys/register/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
+          body: JSON.stringify({
+            challengeId,
+            response: {
+              id: credential.id,
+              rawId: bufferToBase64(credential.rawId),
+              type: credential.type,
+              response: {
+                clientDataJSON: bufferToBase64(credential.response.clientDataJSON),
+                attestationObject: bufferToBase64(credential.response.attestationObject),
+              },
+            },
+          }),
+        });
+        const result = await verifyRes.json();
+        if (result.success) {
+          alert('Passkey registered successfully!');
+          loadPasskeys();
+        } else {
+          alert('Failed: ' + (result.error || 'Unknown error'));
+        }
+      } catch (e) {
+        alert('Registration failed: ' + e.message);
+      }
+    }
+
+    async function deletePasskey(credentialId) {
+      if (!confirm('Delete this passkey?')) return;
+      const res = await fetch(`/api/manage/passkeys/${encodeURIComponent(credentialId)}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${sessionToken}` }
+      });
+      const result = await res.json();
+      if (result.success) {
+        loadPasskeys();
+      } else {
+        alert(result.error || 'Failed to delete passkey');
+      }
+    }
+
+    function showResetPasskeyForm() {
+      document.getElementById('resetPasskeyForm').style.display = 'block';
+      document.getElementById('resetPasskeyLink').style.display = 'none';
+      // Hide normal auth elements
+      document.getElementById('authBtn').style.display = 'none';
+      document.getElementById('authPassword').parentElement.style.display = 'none';
+    }
+
+    async function doResetPasskey() {
+      const password = document.getElementById('resetPassword').value;
+      if (!password) { showResetError('Password required'); return; }
+      try {
+        document.getElementById('resetError').style.display = 'none';
+        // Step 1: Verify password and get registration options
+        const res = await fetch('/api/manage/reset-passkey', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password }),
+        });
+        const data = await res.json();
+        if (!res.ok) { showResetError(data.error || 'Failed'); return; }
+
+        // Step 2: Create new passkey
+        const credential = await navigator.credentials.create({
+          publicKey: {
+            ...data.options,
+            challenge: base64ToBuffer(data.options.challenge),
+            user: { ...data.options.user, id: base64ToBuffer(data.options.user.id) },
+          },
+        });
+
+        // Step 3: Verify registration
+        const verifyRes = await fetch('/api/manage/reset-passkey/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            challengeId: data.challengeId,
+            resetToken: data.resetToken,
+            response: {
+              id: credential.id,
+              rawId: bufferToBase64(credential.rawId),
+              type: credential.type,
+              response: {
+                clientDataJSON: bufferToBase64(credential.response.clientDataJSON),
+                attestationObject: bufferToBase64(credential.response.attestationObject),
+              },
+            },
+          }),
+        });
+        const result = await verifyRes.json();
+        if (result.success) {
+          sessionToken = result.token;
+          sessionStorage.setItem('vaultToken', result.token);
+          document.getElementById('authOverlay').classList.add('hidden');
+          loadVaultData();
+          loadPasskeys();
+        } else {
+          showResetError(result.error || 'Failed');
+        }
+      } catch (e) {
+        showResetError(e.message);
+      }
+    }
+
+    function showResetError(msg) {
+      const el = document.getElementById('resetError');
+      el.textContent = msg;
+      el.style.display = 'block';
+    }
+
+    // Policy management
+    let policyAllowed = [];
+    let policyDenied = [];
+
+    function renderPolicy() {
+      const policy = vaultData.policy || { allowedCommands: [], deniedCommands: [] };
+      policyAllowed = [...(policy.allowedCommands || [])];
+      policyDenied = [...(policy.deniedCommands || [])];
+      renderPolicyTags('allowed');
+      renderPolicyTags('denied');
+    }
+
+    function renderPolicyTags(type) {
+      const list = type === 'allowed' ? policyAllowed : policyDenied;
+      const container = document.getElementById(type === 'allowed' ? 'allowedCommandsTags' : 'deniedCommandsTags');
+      if (list.length === 0) {
+        container.innerHTML = '<span style="color: var(--text-dim); font-size: 13px;">None</span>';
+        return;
+      }
+      container.innerHTML = list.map((cmd, i) => `<span class="tag" style="display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px;">${escapeHtml(cmd)} <span onclick="removePolicyCommand('${type}', ${i})" style="cursor: pointer; color: var(--error); font-weight: bold;">&times;</span></span>`).join('');
+    }
+
+    function addPolicyCommand(type) {
+      const input = document.getElementById(type === 'allowed' ? 'allowedCommandInput' : 'deniedCommandInput');
+      const val = input.value.trim();
+      if (!val) return;
+      const list = type === 'allowed' ? policyAllowed : policyDenied;
+      if (!list.includes(val)) list.push(val);
+      input.value = '';
+      renderPolicyTags(type);
+    }
+
+    function removePolicyCommand(type, index) {
+      const list = type === 'allowed' ? policyAllowed : policyDenied;
+      list.splice(index, 1);
+      renderPolicyTags(type);
+    }
+
+    async function savePolicy() {
+      const statusEl = document.getElementById('policySaveStatus');
+      try {
+        const res = await fetch('/api/manage/policy', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
+          body: JSON.stringify({ allowedCommands: policyAllowed, deniedCommands: policyDenied })
+        });
+        const result = await res.json();
+        if (result.success) {
+          vaultData.policy = result.policy;
+          statusEl.style.color = 'var(--success)';
+          statusEl.textContent = '✅ Policy saved';
+        } else {
+          statusEl.style.color = 'var(--error)';
+          statusEl.textContent = '❌ ' + (result.error || 'Failed');
+        }
+      } catch (e) {
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = '❌ ' + e.message;
+      }
+      statusEl.style.display = 'block';
+      setTimeout(() => { statusEl.style.display = 'none'; }, 3000);
     }
 
     // Init
