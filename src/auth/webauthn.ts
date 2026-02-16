@@ -57,7 +57,6 @@ export class WebAuthnManager {
       userDisplayName: userName,
       attestationType: 'none',
       authenticatorSelection: {
-        authenticatorAttachment: 'platform',
         residentKey: 'required',
         userVerification: 'required',
       },
