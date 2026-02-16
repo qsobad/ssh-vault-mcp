@@ -557,6 +557,20 @@ export class VaultManager {
   }
 
   /**
+   * Get all active sessions
+   */
+  getActiveSessions(): Session[] {
+    const now = Date.now();
+    const active: Session[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.expiresAt > now) {
+        active.push(session);
+      }
+    }
+    return active;
+  }
+
+  /**
    * Revoke a session
    */
   revokeSession(sessionId: string): boolean {
