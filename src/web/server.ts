@@ -345,6 +345,9 @@ export class WebServer {
             }, execTimeout * 1000);
           });
 
+          // Prolong session on successful execution
+          this.vaultManager.touchSession(sessionId);
+
           res.json({
             success: true,
             host,
@@ -788,7 +791,13 @@ export class WebServer {
         res.json({
           hosts: vault.hosts.map(h => ({ ...h, credential: '***' })), // Hide credentials
           agents: vault.agents,
-          sessions: [], // TODO: get from vault manager
+          sessions: this.vaultManager.getActiveSessions().map(s => ({
+            id: s.id,
+            agentFingerprint: s.agentFingerprint,
+            approvedHosts: s.approvedHosts,
+            createdAt: s.createdAt,
+            expiresAt: s.expiresAt,
+          }))
         });
       } catch (error) {
         res.status(500).json({ error: 'Failed to load vault' });

@@ -483,8 +483,9 @@ export class VaultManager {
         await this.storage.save(fullVaultForAccess, this.currentSignature!);
         this.vault = this.stripCredentials(fullVaultForAccess);
         
-        // Create session for the agent
+        // Create session for the agent with approved hosts
         const session = this.createSession(req.fingerprint);
+        session.approvedHosts = [...agent.allowedHosts];
         
         // Emit event to listeners
         this.emitChallengeEvent(foundId, {
@@ -553,6 +554,30 @@ export class VaultManager {
       return null;
     }
     return session;
+  }
+
+  /**
+   * Extend session expiration (call on successful operations)
+   */
+  touchSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session && session.expiresAt > Date.now()) {
+      session.expiresAt = Date.now() + this.sessionTimeoutMs;
+    }
+  }
+
+  /**
+   * Get all active sessions
+   */
+  getActiveSessions(): Session[] {
+    const now = Date.now();
+    const active: Session[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.expiresAt > now) {
+        active.push(session);
+      }
+    }
+    return active;
   }
 
   /**
