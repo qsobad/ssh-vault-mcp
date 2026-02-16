@@ -21,6 +21,7 @@ import {
   generateSalt,
   deriveKeyFromPassword,
   toBase64,
+  LEGACY_KDF_PARAMS,
 } from '../../src/vault/encryption.js';
 import type { PasskeyCredential } from '../../src/types.js';
 import { promises as fs } from 'fs';
@@ -59,7 +60,7 @@ async function createTestVault(
   };
 
   const salt = generateSalt();
-  const vek = deriveKeyFromPassword('test-password-123', salt);
+  const vek = deriveKeyFromPassword('test-password-123', salt, LEGACY_KDF_PARAMS);
   await vaultManager.createVault(credential, vek, toBase64(salt));
 
   return { vaultManager, vek, vaultPath };

@@ -447,14 +447,21 @@ export class WebServer {
           return;
         }
 
-        // Derive VEK from master password + random salt
-        const { deriveKeyFromPassword, generateSalt, toBase64 } = await import('../vault/encryption.js');
+        // Validate password strength
+        const { deriveKeyFromPassword, generateSalt, toBase64, validatePasswordStrength, DEFAULT_KDF_PARAMS } = await import('../vault/encryption.js');
+        const strengthCheck = validatePasswordStrength(password);
+        if (!strengthCheck.valid) {
+          res.status(400).json({ error: 'Weak password', details: strengthCheck.errors });
+          return;
+        }
+
+        // Derive VEK from master password + random salt using strong KDF params
         const passwordSalt = generateSalt();
-        const vek = deriveKeyFromPassword(password, passwordSalt);
+        const vek = deriveKeyFromPassword(password, passwordSalt, DEFAULT_KDF_PARAMS);
         console.log('[register] VEK derived from password, length:', vek.length);
-        
-        // Create vault with the credential and VEK
-        await this.vaultManager.createVault(result.credential, vek, toBase64(passwordSalt));
+
+        // Create vault with the credential, VEK, and KDF params
+        await this.vaultManager.createVault(result.credential, vek, toBase64(passwordSalt), DEFAULT_KDF_PARAMS);
 
         // Create management session so user doesn't need to auth again
         const token = crypto.randomUUID();
@@ -575,14 +582,14 @@ export class WebServer {
           this.vaultManager.updateChallengeHosts(vaultChallengeId, allowedHosts);
         }
 
-        // Get vault metadata for credential
+        // Get public metadata for WebAuthn (no salt exposed yet)
         const metadata = await this.vaultManager.getMetadata();
         if (!metadata) {
           res.status(404).json({ error: 'No vault found' });
           return;
         }
 
-        // Verify WebAuthn response
+        // Verify WebAuthn response FIRST (before accessing any sensitive data)
         const result = await this.webauthn.verifyAuthentication(
           webauthnChallengeId,
           response,
@@ -600,10 +607,15 @@ export class WebServer {
           return;
         }
 
-        // Derive VEK from password + stored salt
+        // Only AFTER WebAuthn succeeds: get salt + kdfParams for VEK derivation
+        const authMeta = await this.vaultManager.getAuthMetadata();
+        if (!authMeta) {
+          res.status(404).json({ error: 'No vault found' });
+          return;
+        }
         const { deriveKeyFromPassword, fromBase64: fromB64 } = await import('../vault/encryption.js');
-        const passwordSalt = fromB64(metadata.passwordSalt);
-        const vek = deriveKeyFromPassword(password, passwordSalt);
+        const passwordSalt = fromB64(authMeta.passwordSalt);
+        const vek = deriveKeyFromPassword(password, passwordSalt, authMeta.kdfParams);
 
         // Complete vault challenge with VEK (auto-unlock if agent is listening)
         const unlockResult = await this.vaultManager.completeChallenge(
@@ -722,12 +734,14 @@ export class WebServer {
           return;
         }
 
+        // Get public metadata for WebAuthn (no salt exposed)
         const metadata = await this.vaultManager.getMetadata();
         if (!metadata) {
           res.status(404).json({ error: 'No vault found' });
           return;
         }
 
+        // Verify WebAuthn FIRST before accessing sensitive data
         const result = await this.webauthn.verifyAuthentication(
           challengeId,
           response,
@@ -745,10 +759,15 @@ export class WebServer {
           return;
         }
 
-        // Derive VEK from password + stored salt
+        // Only AFTER WebAuthn succeeds: get salt + kdfParams for VEK derivation
+        const authMeta = await this.vaultManager.getAuthMetadata();
+        if (!authMeta) {
+          res.status(404).json({ error: 'No vault found' });
+          return;
+        }
         const { deriveKeyFromPassword, fromBase64 } = await import('../vault/encryption.js');
-        const passwordSalt = fromBase64(metadata.passwordSalt);
-        const vek = deriveKeyFromPassword(password, passwordSalt);
+        const passwordSalt = fromBase64(authMeta.passwordSalt);
+        const vek = deriveKeyFromPassword(password, passwordSalt, authMeta.kdfParams);
         console.log('[manage-auth] VEK derived from password, length:', vek.length);
 
         // Verify VEK by trying to decrypt vault

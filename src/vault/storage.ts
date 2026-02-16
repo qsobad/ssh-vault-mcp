@@ -14,6 +14,9 @@ import {
   decryptString,
   toBase64,
   fromBase64,
+  type KdfParams,
+  DEFAULT_KDF_PARAMS,
+  LEGACY_KDF_PARAMS,
 } from './encryption.js';
 
 export class VaultStorage {
@@ -82,12 +85,14 @@ export class VaultStorage {
       const vaultJson = JSON.stringify(vault);
       const encryptedData = encryptString(vaultJson, vek, nonce);
 
-      // Read existing file to preserve passwordSalt
+      // Read existing file to preserve passwordSalt and kdfParams
       let passwordSalt = '';
+      let kdfParams: KdfParams | undefined;
       if (await this.exists()) {
         const fileContent = await fs.readFile(this.vaultPath, 'utf-8');
         const existing: VaultFile = JSON.parse(fileContent);
         passwordSalt = existing.passwordSalt;
+        kdfParams = existing.kdfParams;
       }
 
       const vaultFile: VaultFile = {
@@ -100,6 +105,7 @@ export class VaultStorage {
         salt: toBase64(salt),
         nonce: toBase64(nonce),
         data: encryptedData,
+        kdfParams,
       };
 
       // Ensure directory exists
@@ -116,9 +122,14 @@ export class VaultStorage {
   }
 
   /**
-   * Save vault with passwordSalt (for initial creation)
+   * Save vault with passwordSalt and kdfParams (for initial creation)
    */
-  async saveWithPasswordSalt(vault: Vault, vek: Uint8Array, passwordSalt: string): Promise<void> {
+  async saveWithPasswordSalt(
+    vault: Vault,
+    vek: Uint8Array,
+    passwordSalt: string,
+    kdfParams: KdfParams = DEFAULT_KDF_PARAMS
+  ): Promise<void> {
     await initSodium();
 
     if (this.backupEnabled && await this.exists()) {
@@ -142,6 +153,7 @@ export class VaultStorage {
       salt: toBase64(salt),
       nonce: toBase64(nonce),
       data: encryptedData,
+      kdfParams,
     };
 
     const dir = path.dirname(this.vaultPath);
@@ -196,13 +208,38 @@ export class VaultStorage {
   }
 
   /**
-   * Get vault metadata without decrypting
+   * Get public vault metadata without decrypting.
+   * Does NOT expose passwordSalt or kdfParams (prevents offline brute-force info leak).
    */
   async getMetadata(): Promise<{
     credentialId: string;
     publicKey: string;
     algorithm: number;
+  } | null> {
+    if (!await this.exists()) {
+      return null;
+    }
+
+    const fileContent = await fs.readFile(this.vaultPath, 'utf-8');
+    const vaultFile: VaultFile = JSON.parse(fileContent);
+
+    return {
+      credentialId: vaultFile.credentialId,
+      publicKey: vaultFile.publicKey,
+      algorithm: vaultFile.algorithm,
+    };
+  }
+
+  /**
+   * Get vault metadata including passwordSalt and kdfParams.
+   * Only call this AFTER authenticating the caller (e.g., after WebAuthn verification).
+   */
+  async getAuthMetadata(): Promise<{
+    credentialId: string;
+    publicKey: string;
+    algorithm: number;
     passwordSalt: string;
+    kdfParams: KdfParams;
   } | null> {
     if (!await this.exists()) {
       return null;
@@ -216,6 +253,7 @@ export class VaultStorage {
       publicKey: vaultFile.publicKey,
       algorithm: vaultFile.algorithm,
       passwordSalt: vaultFile.passwordSalt,
+      kdfParams: vaultFile.kdfParams ?? LEGACY_KDF_PARAMS,
     };
   }
 

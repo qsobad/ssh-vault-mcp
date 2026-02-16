@@ -129,15 +129,29 @@ export class VaultManager {
   }
 
   /**
-   * Get vault metadata (without unlocking)
+   * Get public vault metadata (without unlocking).
+   * Does NOT expose passwordSalt or kdfParams.
    */
   async getMetadata(): Promise<{
     credentialId: string;
     publicKey: string;
     algorithm: number;
-    passwordSalt: string;
   } | null> {
     return this.storage.getMetadata();
+  }
+
+  /**
+   * Get vault metadata including passwordSalt and kdfParams.
+   * Only call AFTER authenticating the caller (e.g., after WebAuthn verification).
+   */
+  async getAuthMetadata(): Promise<{
+    credentialId: string;
+    publicKey: string;
+    algorithm: number;
+    passwordSalt: string;
+    kdfParams: { t: number; m: number; p: number; dkLen: number };
+  } | null> {
+    return this.storage.getAuthMetadata();
   }
 
   /**
@@ -145,15 +159,17 @@ export class VaultManager {
    * @param credential - Passkey credential
    * @param vek - Vault Encryption Key (derived from master password)
    * @param passwordSalt - Base64-encoded salt used for password key derivation
+   * @param kdfParams - KDF parameters used to derive the VEK (stored for future decryption)
    */
   async createVault(
     credential: PasskeyCredential,
     vek: Uint8Array,
-    passwordSalt?: string
+    passwordSalt?: string,
+    kdfParams?: { t: number; m: number; p: number; dkLen: number }
   ): Promise<void> {
     const fullVault = await this.storage.create(credential, vek);
     if (passwordSalt) {
-      await this.storage.saveWithPasswordSalt(fullVault, vek, passwordSalt);
+      await this.storage.saveWithPasswordSalt(fullVault, vek, passwordSalt, kdfParams);
     }
     this.vault = this.stripCredentials(fullVault);
     this.currentSignature = new Uint8Array(vek);

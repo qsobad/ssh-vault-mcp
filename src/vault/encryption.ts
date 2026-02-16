@@ -6,6 +6,42 @@
 import nacl from 'tweetnacl';
 import { argon2id } from '@noble/hashes/argon2.js';
 
+/**
+ * KDF (Key Derivation Function) parameters for Argon2id.
+ * Stored in the vault file so existing vaults can always be decrypted
+ * even if defaults change.
+ */
+export interface KdfParams {
+  t: number;     // time cost (iterations)
+  m: number;     // memory cost in KiB
+  p: number;     // parallelism (lanes)
+  dkLen: number; // derived key length in bytes
+}
+
+/**
+ * Strong KDF parameters for new vaults.
+ * t=10 iterations, m=256 MB, p=4 lanes.
+ * At ~10-50 hashes/sec on modern hardware, a 12-char mixed password
+ * (~72 bits entropy) is computationally infeasible to brute-force.
+ */
+export const DEFAULT_KDF_PARAMS: KdfParams = {
+  t: 10,
+  m: 262144,  // 256 MB (in KiB)
+  p: 4,
+  dkLen: 32,
+};
+
+/**
+ * Legacy KDF parameters used by vaults created before the hardening.
+ * Used when loading vaults that don't have stored kdfParams.
+ */
+export const LEGACY_KDF_PARAMS: KdfParams = {
+  t: 3,
+  m: 65536,  // 64 MB
+  p: 1,
+  dkLen: 32,
+};
+
 // Base64 encoding/decoding utilities
 function encodeBase64(data: Uint8Array): string {
   return Buffer.from(data).toString('base64');
@@ -53,10 +89,10 @@ export function deriveKeyFromSignature(
   salt: Uint8Array
 ): Uint8Array {
   return argon2id(signature, salt, {
-    t: 3,
-    m: 65536,
-    p: 1,
-    dkLen: 32,
+    t: LEGACY_KDF_PARAMS.t,
+    m: LEGACY_KDF_PARAMS.m,
+    p: LEGACY_KDF_PARAMS.p,
+    dkLen: LEGACY_KDF_PARAMS.dkLen,
   });
 }
 
@@ -64,19 +100,51 @@ export function deriveKeyFromSignature(
  * Derive encryption key from master password using Argon2id
  * @param password - The master password
  * @param salt - Random salt for key derivation
+ * @param params - KDF parameters (defaults to DEFAULT_KDF_PARAMS for new vaults;
+ *                 pass stored kdfParams from vault file for existing vaults)
  * @returns 32-byte encryption key (VEK)
  */
 export function deriveKeyFromPassword(
   password: string,
-  salt: Uint8Array
+  salt: Uint8Array,
+  params: KdfParams = DEFAULT_KDF_PARAMS
 ): Uint8Array {
   const passwordBytes = new TextEncoder().encode(password);
   return argon2id(passwordBytes, salt, {
-    t: 3,      // iterations
-    m: 65536,  // 64MB memory
-    p: 1,      // parallelism
-    dkLen: 32, // output key length
+    t: params.t,
+    m: params.m,
+    p: params.p,
+    dkLen: params.dkLen,
   });
+}
+
+/**
+ * Validate master password strength.
+ * Requires: >= 12 chars, uppercase, lowercase, digit, special character.
+ */
+export function validatePasswordStrength(password: string): {
+  valid: boolean;
+  errors: string[];
+} {
+  const errors: string[] = [];
+
+  if (password.length < 12) {
+    errors.push('Password must be at least 12 characters long');
+  }
+  if (!/[a-z]/.test(password)) {
+    errors.push('Password must contain at least one lowercase letter');
+  }
+  if (!/[A-Z]/.test(password)) {
+    errors.push('Password must contain at least one uppercase letter');
+  }
+  if (!/[0-9]/.test(password)) {
+    errors.push('Password must contain at least one digit');
+  }
+  if (!/[^a-zA-Z0-9]/.test(password)) {
+    errors.push('Password must contain at least one special character');
+  }
+
+  return { valid: errors.length === 0, errors };
 }
 
 /**

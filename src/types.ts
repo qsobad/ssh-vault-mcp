@@ -62,6 +62,12 @@ export interface VaultFile {
   salt: string;               // For encryption key derivation (base64)
   nonce: string;              // For encryption (base64)
   data: string;               // Encrypted vault data (base64)
+  kdfParams?: {               // Argon2id parameters (absent in legacy vaults)
+    t: number;                // time cost (iterations)
+    m: number;                // memory cost (KiB)
+    p: number;                // parallelism
+    dkLen: number;            // derived key length
+  };
 }
 
 export interface UnlockChallenge {

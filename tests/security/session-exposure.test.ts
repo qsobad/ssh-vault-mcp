@@ -16,6 +16,7 @@ import {
   generateSalt,
   deriveKeyFromPassword,
   toBase64,
+  LEGACY_KDF_PARAMS,
 } from '../../src/vault/encryption.js';
 import type { PasskeyCredential, Session } from '../../src/types.js';
 import { promises as fs } from 'fs';
@@ -49,7 +50,7 @@ async function createTestVault(opts?: { sessionTimeoutMinutes?: number }): Promi
   };
 
   const salt = generateSalt();
-  const vek = deriveKeyFromPassword('test-password-session-exposure', salt);
+  const vek = deriveKeyFromPassword('test-password-session-exposure', salt, LEGACY_KDF_PARAMS);
   await vaultManager.createVault(credential, vek, toBase64(salt));
 
   return { vaultManager, vek, vaultPath };

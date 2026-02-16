@@ -21,55 +21,56 @@ import {
   secureWipe,
   toBase64,
   fromBase64,
+  LEGACY_KDF_PARAMS,
 } from '../../src/vault/encryption.js';
 
 describe('Security Breach: Vault Encryption', () => {
   describe('Key Derivation', () => {
     it('should produce different keys for different passwords', () => {
       const salt = generateSalt();
-      const key1 = deriveKeyFromPassword('password1', salt);
-      const key2 = deriveKeyFromPassword('password2', salt);
+      const key1 = deriveKeyFromPassword('password1', salt, LEGACY_KDF_PARAMS);
+      const key2 = deriveKeyFromPassword('password2', salt, LEGACY_KDF_PARAMS);
       expect(Buffer.from(key1).equals(Buffer.from(key2))).toBe(false);
     });
 
     it('should produce different keys for different salts', () => {
       const salt1 = generateSalt();
       const salt2 = generateSalt();
-      const key1 = deriveKeyFromPassword('samepassword', salt1);
-      const key2 = deriveKeyFromPassword('samepassword', salt2);
+      const key1 = deriveKeyFromPassword('samepassword', salt1, LEGACY_KDF_PARAMS);
+      const key2 = deriveKeyFromPassword('samepassword', salt2, LEGACY_KDF_PARAMS);
       expect(Buffer.from(key1).equals(Buffer.from(key2))).toBe(false);
     });
 
     it('should produce consistent keys for same password+salt', () => {
       const salt = generateSalt();
-      const key1 = deriveKeyFromPassword('mypassword', salt);
-      const key2 = deriveKeyFromPassword('mypassword', salt);
+      const key1 = deriveKeyFromPassword('mypassword', salt, LEGACY_KDF_PARAMS);
+      const key2 = deriveKeyFromPassword('mypassword', salt, LEGACY_KDF_PARAMS);
       expect(Buffer.from(key1).equals(Buffer.from(key2))).toBe(true);
     });
 
     it('should always produce 32-byte keys', () => {
       const salt = generateSalt();
-      const key = deriveKeyFromPassword('any-password', salt);
+      const key = deriveKeyFromPassword('any-password', salt, LEGACY_KDF_PARAMS);
       expect(key.length).toBe(32);
     });
 
     it('should handle empty passwords', () => {
       const salt = generateSalt();
       // Should not throw, even with empty password
-      const key = deriveKeyFromPassword('', salt);
+      const key = deriveKeyFromPassword('', salt, LEGACY_KDF_PARAMS);
       expect(key.length).toBe(32);
     });
 
     it('should handle very long passwords', () => {
       const salt = generateSalt();
       const longPassword = 'a'.repeat(10000);
-      const key = deriveKeyFromPassword(longPassword, salt);
+      const key = deriveKeyFromPassword(longPassword, salt, LEGACY_KDF_PARAMS);
       expect(key.length).toBe(32);
     });
 
     it('should handle unicode passwords', () => {
       const salt = generateSalt();
-      const key = deriveKeyFromPassword('p\u00e4ssw\u00f6rd\ud83d\udd12', salt);
+      const key = deriveKeyFromPassword('p\u00e4ssw\u00f6rd\ud83d\udd12', salt, LEGACY_KDF_PARAMS);
       expect(key.length).toBe(32);
     });
 
@@ -77,7 +78,7 @@ describe('Security Breach: Vault Encryption', () => {
       const salt = generateSalt();
       const signature = nacl.randomBytes(64);
       const keyFromSig = deriveKeyFromSignature(signature, salt);
-      const keyFromPwd = deriveKeyFromPassword('test', salt);
+      const keyFromPwd = deriveKeyFromPassword('test', salt, LEGACY_KDF_PARAMS);
       expect(Buffer.from(keyFromSig).equals(Buffer.from(keyFromPwd))).toBe(false);
     });
   });

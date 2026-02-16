@@ -14,6 +14,7 @@ import {
   generateNonce,
   deriveKeyFromPassword,
   toBase64,
+  LEGACY_KDF_PARAMS,
 } from '../../src/vault/encryption.js';
 import type { PasskeyCredential, Vault } from '../../src/types.js';
 import { promises as fs } from 'fs';
@@ -46,7 +47,7 @@ describe('Security Breach: Session Hijacking', () => {
     };
 
     const salt = generateSalt();
-    vek = deriveKeyFromPassword('test-password-123', salt);
+    vek = deriveKeyFromPassword('test-password-123', salt, LEGACY_KDF_PARAMS);
     await vaultManager.createVault(credential, vek, toBase64(salt));
   });
 
