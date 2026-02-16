@@ -557,6 +557,16 @@ export class VaultManager {
   }
 
   /**
+   * Extend session expiration (call on successful operations)
+   */
+  touchSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session && session.expiresAt > Date.now()) {
+      session.expiresAt = Date.now() + this.sessionTimeoutMs;
+    }
+  }
+
+  /**
    * Get all active sessions
    */
   getActiveSessions(): Session[] {

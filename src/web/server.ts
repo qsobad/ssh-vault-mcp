@@ -345,6 +345,9 @@ export class WebServer {
             }, execTimeout * 1000);
           });
 
+          // Prolong session on successful execution
+          this.vaultManager.touchSession(sessionId);
+
           res.json({
             success: true,
             host,
