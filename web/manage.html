@@ -237,6 +237,7 @@
       <div class="tab" onclick="showTab('agents')">🤖 Agents</div>
       <div class="tab" onclick="showTab('sessions')">🔑 Sessions</div>
       <div class="tab" onclick="showTab('passkeys')">🔐 Passkeys</div>
+      <div class="tab" onclick="showTab('policy')">⚙️ Policy</div>
     </div>
 
     <!-- Hosts Tab -->
@@ -337,6 +338,35 @@
         <div class="empty-state" id="passkeysEmpty" style="display: none;">
           No passkeys registered.
         </div>
+      </div>
+    </div>
+
+    <!-- Policy Tab -->
+    <div id="policy-tab" class="tab-content" style="display: none;">
+      <div class="card">
+        <div class="card-header">
+          <h2>Global Command Policy</h2>
+        </div>
+        <div style="margin-bottom: 24px;">
+          <h3 style="font-size: 15px; margin-bottom: 8px;">✅ Allowed Commands (Whitelist)</h3>
+          <p style="font-size: 12px; color: var(--text-dim); margin-bottom: 12px;">If set, only these commands are permitted. Leave empty to allow all (except denied).</p>
+          <div id="allowedCommandsTags" style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px;"></div>
+          <div style="display: flex; gap: 8px;">
+            <input type="text" id="allowedCommandInput" placeholder="e.g. ls, cat, grep" style="flex: 1; padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px;">
+            <button class="btn btn-primary btn-sm" onclick="addPolicyCommand('allowed')">Add</button>
+          </div>
+        </div>
+        <div style="margin-bottom: 24px;">
+          <h3 style="font-size: 15px; margin-bottom: 8px;">🚫 Denied Commands (Blacklist)</h3>
+          <p style="font-size: 12px; color: var(--text-dim); margin-bottom: 12px;">These commands are always blocked, even if in the whitelist.</p>
+          <div id="deniedCommandsTags" style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px;"></div>
+          <div style="display: flex; gap: 8px;">
+            <input type="text" id="deniedCommandInput" placeholder="e.g. rm -rf, mkfs, dd if=" style="flex: 1; padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px;">
+            <button class="btn btn-primary btn-sm" onclick="addPolicyCommand('denied')">Add</button>
+          </div>
+        </div>
+        <button class="btn btn-primary" onclick="savePolicy()" style="width: 100%;">💾 Save Policy</button>
+        <div id="policySaveStatus" style="text-align: center; margin-top: 12px; font-size: 13px; display: none;"></div>
       </div>
     </div>
 
@@ -662,6 +692,7 @@
           renderHosts();
           renderAgents();
           renderSessions();
+          renderPolicy();
         }
       } catch (e) {
         console.error('Failed to load vault data:', e);
@@ -1101,6 +1132,69 @@
       const el = document.getElementById('resetError');
       el.textContent = msg;
       el.style.display = 'block';
+    }
+
+    // Policy management
+    let policyAllowed = [];
+    let policyDenied = [];
+
+    function renderPolicy() {
+      const policy = vaultData.policy || { allowedCommands: [], deniedCommands: [] };
+      policyAllowed = [...(policy.allowedCommands || [])];
+      policyDenied = [...(policy.deniedCommands || [])];
+      renderPolicyTags('allowed');
+      renderPolicyTags('denied');
+    }
+
+    function renderPolicyTags(type) {
+      const list = type === 'allowed' ? policyAllowed : policyDenied;
+      const container = document.getElementById(type === 'allowed' ? 'allowedCommandsTags' : 'deniedCommandsTags');
+      if (list.length === 0) {
+        container.innerHTML = '<span style="color: var(--text-dim); font-size: 13px;">None</span>';
+        return;
+      }
+      container.innerHTML = list.map((cmd, i) => `<span class="tag" style="display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px;">${escapeHtml(cmd)} <span onclick="removePolicyCommand('${type}', ${i})" style="cursor: pointer; color: var(--error); font-weight: bold;">&times;</span></span>`).join('');
+    }
+
+    function addPolicyCommand(type) {
+      const input = document.getElementById(type === 'allowed' ? 'allowedCommandInput' : 'deniedCommandInput');
+      const val = input.value.trim();
+      if (!val) return;
+      const list = type === 'allowed' ? policyAllowed : policyDenied;
+      if (!list.includes(val)) list.push(val);
+      input.value = '';
+      renderPolicyTags(type);
+    }
+
+    function removePolicyCommand(type, index) {
+      const list = type === 'allowed' ? policyAllowed : policyDenied;
+      list.splice(index, 1);
+      renderPolicyTags(type);
+    }
+
+    async function savePolicy() {
+      const statusEl = document.getElementById('policySaveStatus');
+      try {
+        const res = await fetch('/api/manage/policy', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
+          body: JSON.stringify({ allowedCommands: policyAllowed, deniedCommands: policyDenied })
+        });
+        const result = await res.json();
+        if (result.success) {
+          vaultData.policy = result.policy;
+          statusEl.style.color = 'var(--success)';
+          statusEl.textContent = '✅ Policy saved';
+        } else {
+          statusEl.style.color = 'var(--error)';
+          statusEl.textContent = '❌ ' + (result.error || 'Failed');
+        }
+      } catch (e) {
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = '❌ ' + e.message;
+      }
+      statusEl.style.display = 'block';
+      setTimeout(() => { statusEl.style.display = 'none'; }, 3000);
     }
 
     // Init

@@ -809,7 +809,8 @@ export class WebServer {
             approvedHosts: s.approvedHosts,
             createdAt: s.createdAt,
             expiresAt: s.expiresAt,
-          }))
+          })),
+          policy: vault.policy,
         });
       } catch (error) {
         res.status(500).json({ error: 'Failed to load vault' });
@@ -918,6 +919,35 @@ export class WebServer {
         res.json({ success: true });
       } catch (error) {
         res.status(500).json({ error: 'Failed to delete host' });
+      }
+    });
+
+    // Update global policy
+    this.app.put('/api/manage/policy', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      try {
+        const { allowedCommands, deniedCommands } = req.body;
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, true);
+        const vault = await storage.load(session.vek);
+
+        vault.policy = {
+          allowedCommands: Array.isArray(allowedCommands) ? allowedCommands : [],
+          deniedCommands: Array.isArray(deniedCommands) ? deniedCommands : [],
+        };
+
+        await storage.save(vault, session.vek);
+        res.json({ success: true, policy: vault.policy });
+      } catch (error) {
+        console.error('[update-policy] Error:', error);
+        res.status(500).json({ error: 'Failed to update policy' });
       }
     });
 
