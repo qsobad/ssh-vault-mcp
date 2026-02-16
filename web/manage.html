@@ -432,7 +432,7 @@
   </div>
 
   <script>
-    let sessionToken = null;
+    let sessionToken = sessionStorage.getItem('vaultToken');
     let vaultData = { hosts: [], agents: [], sessions: [] };
 
     let vaultExists = false;
@@ -450,6 +450,23 @@
         const status = await statusRes.json();
         vaultExists = status.vaultExists;
         
+        // Try restoring session from sessionStorage
+        if (sessionToken && vaultExists) {
+          try {
+            const testRes = await fetch('/api/manage/data', {
+              headers: { 'Authorization': `Bearer ${sessionToken}` }
+            });
+            if (testRes.ok) {
+              document.getElementById('authOverlay').classList.add('hidden');
+              loadVaultData();
+              return;
+            }
+          } catch (_) {}
+          // Token invalid, clear it
+          sessionToken = null;
+          sessionStorage.removeItem('vaultToken');
+        }
+
         if (!vaultExists) {
           document.getElementById('authStatus').textContent = 'Set a master password and create Passkey';
           document.getElementById('authBtn').textContent = '➕ Create Passkey';
@@ -525,6 +542,7 @@
 
       if (result.token) {
         sessionToken = result.token;
+        sessionStorage.setItem('vaultToken', result.token);
         document.getElementById('authOverlay').classList.add('hidden');
         loadVaultData();
       } else {
@@ -577,6 +595,7 @@
         const result = await verifyRes.json();
         if (result.success) {
           sessionToken = result.token;
+          sessionStorage.setItem('vaultToken', result.token);
           document.getElementById('authOverlay').classList.add('hidden');
           loadVaultData();
         } else {
