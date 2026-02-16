@@ -55,8 +55,8 @@ export class VaultStorage {
       hosts: [],
       agents: [],
       policy: {
-        allowedCommands: ['ls', 'cat', 'head', 'tail', 'grep', 'find', 'pwd', 'whoami', 'id', 'df', 'du', 'free', 'uptime', 'ps', 'top', 'htop', 'date', 'echo', 'env', 'which', 'file', 'stat', 'wc', 'sort', 'uniq', 'diff', 'less', 'more'],
-        deniedCommands: ['rm -rf /', 'rm -rf /*', 'mkfs', 'dd if=', ':(){:|:&};:', 'chmod -R 777 /', 'chown -R', '> /dev/sda', 'mv /* ', 'wget | sh', 'curl | sh'],
+        allowedCommands: ['*'],
+        deniedCommands: ['rm -rf /', 'rm -rf /*', 'mkfs', 'dd if=', ':(){:|:&};:', '> /dev/sda', 'mv /* '],
       },
     };
 
