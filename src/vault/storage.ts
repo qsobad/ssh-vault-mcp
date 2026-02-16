@@ -5,7 +5,7 @@
 
 import { promises as fs } from 'fs';
 import path from 'path';
-import type { Vault, VaultFile, PasskeyCredential } from '../types.js';
+import type { Vault, VaultFile, VaultFileCredential, PasskeyCredential } from '../types.js';
 import {
   initSodium,
   generateSalt,
@@ -51,6 +51,7 @@ export class VaultStorage {
     const vault: Vault = {
       version: 1,
       owner: credential,
+      credentials: [credential],
       hosts: [],
       agents: [],
       policy: {
@@ -90,12 +91,22 @@ export class VaultStorage {
         passwordSalt = existing.passwordSalt;
       }
 
+      // Build credentials array for VaultFile
+      const allCredentials = (vault.credentials || [vault.owner]);
+      const vaultFileCredentials: VaultFileCredential[] = allCredentials.map(c => ({
+        id: c.id,
+        publicKey: c.publicKey,
+        algorithm: c.algorithm,
+        counter: c.counter,
+      }));
+
       const vaultFile: VaultFile = {
         version: 1,
         credentialId: vault.owner.id,
         publicKey: vault.owner.publicKey,
         algorithm: vault.owner.algorithm,
         counter: vault.owner.counter,
+        credentials: vaultFileCredentials,
         passwordSalt,
         salt: toBase64(salt),
         nonce: toBase64(nonce),
@@ -132,12 +143,21 @@ export class VaultStorage {
     const vaultJson = JSON.stringify(vault);
     const encryptedData = encryptString(vaultJson, vek, nonce);
 
+    const allCredentials = (vault.credentials || [vault.owner]);
+    const vaultFileCredentials: VaultFileCredential[] = allCredentials.map(c => ({
+      id: c.id,
+      publicKey: c.publicKey,
+      algorithm: c.algorithm,
+      counter: c.counter,
+    }));
+
     const vaultFile: VaultFile = {
       version: 1,
       credentialId: vault.owner.id,
       publicKey: vault.owner.publicKey,
       algorithm: vault.owner.algorithm,
       counter: vault.owner.counter,
+      credentials: vaultFileCredentials,
       passwordSalt,
       salt: toBase64(salt),
       nonce: toBase64(nonce),
@@ -169,7 +189,12 @@ export class VaultStorage {
 
     try {
       const vaultJson = decryptString(vaultFile.data, vek, nonce);
-      return JSON.parse(vaultJson) as Vault;
+      const vault = JSON.parse(vaultJson) as Vault;
+      // Backward compat: ensure credentials array exists
+      if (!vault.credentials) {
+        vault.credentials = [vault.owner];
+      }
+      return vault;
     } catch (error) {
       throw new Error('Failed to decrypt vault: invalid password or corrupted data');
     }
@@ -203,6 +228,7 @@ export class VaultStorage {
     publicKey: string;
     algorithm: number;
     passwordSalt: string;
+    credentials: VaultFileCredential[];
   } | null> {
     if (!await this.exists()) {
       return null;
@@ -211,11 +237,20 @@ export class VaultStorage {
     const fileContent = await fs.readFile(this.vaultPath, 'utf-8');
     const vaultFile: VaultFile = JSON.parse(fileContent);
 
+    // Backward compat: build credentials array if not present
+    const credentials = vaultFile.credentials || [{
+      id: vaultFile.credentialId,
+      publicKey: vaultFile.publicKey,
+      algorithm: vaultFile.algorithm,
+      counter: vaultFile.counter,
+    }];
+
     return {
       credentialId: vaultFile.credentialId,
       publicKey: vaultFile.publicKey,
       algorithm: vaultFile.algorithm,
       passwordSalt: vaultFile.passwordSalt,
+      credentials,
     };
   }
 

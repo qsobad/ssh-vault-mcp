@@ -453,7 +453,7 @@ export class WebServer {
         const vek = deriveKeyFromPassword(password, passwordSalt);
         console.log('[register] VEK derived from password, length:', vek.length);
         
-        // Create vault with the credential and VEK
+        // Create vault with the credential and VEK (credentials array initialized in storage.create)
         await this.vaultManager.createVault(result.credential, vek, toBase64(passwordSalt));
 
         // Create management session so user doesn't need to auth again
@@ -537,8 +537,9 @@ export class WebServer {
           return;
         }
 
+        const credentialIds = metadata.credentials.map(c => c.id);
         const { options, challengeId } = await this.webauthn.generateAuthenticationOptions(
-          metadata.credentialId
+          credentialIds
         );
 
         res.json({ options, challengeId });
@@ -582,18 +583,23 @@ export class WebServer {
           return;
         }
 
-        // Verify WebAuthn response
-        const result = await this.webauthn.verifyAuthentication(
-          webauthnChallengeId,
-          response,
-          {
-            id: metadata.credentialId,
-            publicKey: metadata.publicKey,
-            algorithm: metadata.algorithm,
-            counter: 0, // Will be checked from vault
-            createdAt: 0,
-          }
-        );
+        // Try verifying against all registered credentials
+        const allCredentials = metadata.credentials;
+        let result: any = { success: false, error: 'No matching credential' };
+        for (const cred of allCredentials) {
+          result = await this.webauthn.verifyAuthentication(
+            webauthnChallengeId,
+            response,
+            {
+              id: cred.id,
+              publicKey: cred.publicKey,
+              algorithm: cred.algorithm,
+              counter: 0,
+              createdAt: 0,
+            }
+          );
+          if (result.success) break;
+        }
 
         if (!result.success) {
           res.status(400).json({ error: result.error || 'Verification failed' });
@@ -728,17 +734,23 @@ export class WebServer {
           return;
         }
 
-        const result = await this.webauthn.verifyAuthentication(
-          challengeId,
-          response,
-          {
-            id: metadata.credentialId,
-            publicKey: metadata.publicKey,
-            algorithm: metadata.algorithm,
-            counter: 0,
-            createdAt: 0,
-          }
-        );
+        // Try verifying against all registered credentials
+        const allCredentials = metadata.credentials;
+        let result: any = { success: false, error: 'No matching credential' };
+        for (const cred of allCredentials) {
+          result = await this.webauthn.verifyAuthentication(
+            challengeId,
+            response,
+            {
+              id: cred.id,
+              publicKey: cred.publicKey,
+              algorithm: cred.algorithm,
+              counter: 0,
+              createdAt: 0,
+            }
+          );
+          if (result.success) break;
+        }
 
         if (!result.success) {
           res.status(401).json({ error: result.error || 'Auth failed' });
@@ -999,6 +1011,185 @@ export class WebServer {
         res.json({ success: true });
       } catch (error) {
         res.status(500).json({ error: 'Failed to delete agent' });
+      }
+    });
+
+    // Get registered passkeys
+    this.app.get('/api/manage/passkeys', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      try {
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, false);
+        const vault = await storage.load(session.vek);
+        const credentials = (vault.credentials || [vault.owner]).map(c => ({
+          id: c.id,
+          createdAt: c.createdAt,
+          counter: c.counter,
+        }));
+        res.json({ credentials });
+      } catch (error) {
+        res.status(500).json({ error: 'Failed to load passkeys' });
+      }
+    });
+
+    // Register additional passkey (requires active manage session)
+    this.app.post('/api/manage/passkeys/register', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      try {
+        const { options, challengeId } = await this.webauthn.generateRegistrationOptions(
+          crypto.randomUUID(), 'Vault Owner'
+        );
+        res.json({ options, challengeId });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' });
+      }
+    });
+
+    this.app.post('/api/manage/passkeys/register/verify', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      try {
+        const { challengeId, response } = req.body;
+        const result = await this.webauthn.verifyRegistration(challengeId, response);
+        if (!result.success || !result.credential) {
+          res.status(400).json({ error: result.error || 'Verification failed' });
+          return;
+        }
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, true);
+        const vault = await storage.load(session.vek);
+        if (!vault.credentials) vault.credentials = [vault.owner];
+        vault.credentials.push(result.credential);
+        await storage.save(vault, session.vek);
+        res.json({ success: true, credentialId: result.credential.id });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' });
+      }
+    });
+
+    // Delete a passkey
+    this.app.delete('/api/manage/passkeys/:credentialId', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      try {
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, true);
+        const vault = await storage.load(session.vek);
+        if (!vault.credentials) vault.credentials = [vault.owner];
+        if (vault.credentials.length <= 1) {
+          res.status(400).json({ error: 'Cannot delete the last passkey' });
+          return;
+        }
+        const targetId = decodeURIComponent(req.params.credentialId);
+        vault.credentials = vault.credentials.filter(c => c.id !== targetId);
+        // Update owner if deleted
+        if (vault.owner.id === targetId) {
+          vault.owner = vault.credentials[0];
+        }
+        await storage.save(vault, session.vek);
+        res.json({ success: true });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' });
+      }
+    });
+
+    // Reset passkey using master password (recovery flow)
+    this.app.post('/api/manage/reset-passkey', async (req: Request, res: Response) => {
+      if (!checkRateLimit(req.ip || 'unknown')) {
+        res.status(429).json({ error: 'Too many attempts. Try again later.' });
+        return;
+      }
+      try {
+        const { password } = req.body;
+        if (!password) {
+          res.status(400).json({ error: 'Password required' });
+          return;
+        }
+        const metadata = await this.vaultManager.getMetadata();
+        if (!metadata) {
+          res.status(404).json({ error: 'No vault found' });
+          return;
+        }
+        // Derive VEK and verify it can decrypt vault
+        const { deriveKeyFromPassword, fromBase64 } = await import('../vault/encryption.js');
+        const passwordSalt = fromBase64(metadata.passwordSalt);
+        const vek = deriveKeyFromPassword(password, passwordSalt);
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, false);
+        try {
+          await storage.load(vek);
+        } catch {
+          res.status(401).json({ error: 'Invalid password' });
+          return;
+        }
+        // Password valid - generate registration options for new passkey
+        const { options, challengeId } = await this.webauthn.generateRegistrationOptions(
+          crypto.randomUUID(), 'Vault Owner'
+        );
+        // Store VEK temporarily for the verify step
+        const resetToken = crypto.randomUUID();
+        manageSessions.set(`reset:${resetToken}`, {
+          expiresAt: Date.now() + 5 * 60 * 1000, // 5 min
+          vek,
+        });
+        res.json({ options, challengeId, resetToken });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' });
+      }
+    });
+
+    this.app.post('/api/manage/reset-passkey/verify', async (req: Request, res: Response) => {
+      try {
+        const { challengeId, response, resetToken } = req.body;
+        if (!resetToken) {
+          res.status(400).json({ error: 'resetToken required' });
+          return;
+        }
+        const session = manageSessions.get(`reset:${resetToken}`);
+        if (!session || session.expiresAt < Date.now()) {
+          res.status(401).json({ error: 'Reset token expired' });
+          return;
+        }
+        const result = await this.webauthn.verifyRegistration(challengeId, response);
+        if (!result.success || !result.credential) {
+          res.status(400).json({ error: result.error || 'Verification failed' });
+          return;
+        }
+        // Clear all existing credentials and set new one
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, true);
+        const vault = await storage.load(session.vek);
+        vault.owner = result.credential;
+        vault.credentials = [result.credential];
+        await storage.save(vault, session.vek);
+        // Clean up reset token, create manage session
+        manageSessions.delete(`reset:${resetToken}`);
+        const manageToken = crypto.randomUUID();
+        manageSessions.set(manageToken, {
+          expiresAt: Date.now() + 30 * 60 * 1000,
+          vek: session.vek,
+        });
+        res.json({ success: true, token: manageToken, credentialId: result.credential.id });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' });
       }
     });
 

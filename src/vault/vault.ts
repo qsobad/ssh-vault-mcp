@@ -136,6 +136,7 @@ export class VaultManager {
     publicKey: string;
     algorithm: number;
     passwordSalt: string;
+    credentials: import('../types.js').VaultFileCredential[];
   } | null> {
     return this.storage.getMetadata();
   }

@@ -208,6 +208,21 @@
       <button class="btn btn-primary" id="retryBtn" onclick="location.reload()" style="width: 100%; padding: 14px; margin-top: 12px; display: none;">
         🔄 Retry
       </button>
+      <div style="margin-top: 16px;">
+        <a href="#" id="resetPasskeyLink" onclick="showResetPasskeyForm(); return false;" style="color: var(--text-dim); font-size: 13px;">Lost Passkey? Reset with Master Password</a>
+      </div>
+      <!-- Reset Passkey Form (hidden by default) -->
+      <div id="resetPasskeyForm" style="display: none; margin-top: 16px; text-align: left;">
+        <div class="form-group">
+          <label style="color: var(--text-dim);">Master Password</label>
+          <input type="password" id="resetPassword" placeholder="Enter master password" style="width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px;">
+        </div>
+        <button class="btn btn-primary" onclick="doResetPasskey()" style="width: 100%; padding: 14px;">
+          🔑 Reset & Register New Passkey
+        </button>
+        <div id="resetError" style="color: var(--error); margin-top: 8px; display: none;"></div>
+        <div id="resetSuccess" style="color: var(--success); margin-top: 8px; display: none;"></div>
+      </div>
     </div>
   </div>
 
@@ -221,6 +236,7 @@
       <div class="tab active" onclick="showTab('hosts')">🖥️ Hosts</div>
       <div class="tab" onclick="showTab('agents')">🤖 Agents</div>
       <div class="tab" onclick="showTab('sessions')">🔑 Sessions</div>
+      <div class="tab" onclick="showTab('passkeys')">🔐 Passkeys</div>
     </div>
 
     <!-- Hosts Tab -->
@@ -299,6 +315,30 @@
       </div>
     </div>
   </div>
+
+    <!-- Passkeys Tab -->
+    <div id="passkeys-tab" class="tab-content" style="display: none;">
+      <div class="card">
+        <div class="card-header">
+          <h2>Registered Passkeys</h2>
+          <button class="btn btn-primary" onclick="registerAdditionalPasskey()">+ Add Passkey</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Credential ID</th>
+              <th>Created</th>
+              <th>Sign Count</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="passkeysTable"></tbody>
+        </table>
+        <div class="empty-state" id="passkeysEmpty" style="display: none;">
+          No passkeys registered.
+        </div>
+      </div>
+    </div>
 
   <!-- Add Host Modal -->
   <div class="modal" id="addHostModal">
@@ -459,6 +499,7 @@
             if (testRes.ok) {
               document.getElementById('authOverlay').classList.add('hidden');
               loadVaultData();
+              loadPasskeys();
               return;
             }
           } catch (_) {}
@@ -545,6 +586,7 @@
         sessionStorage.setItem('vaultToken', result.token);
         document.getElementById('authOverlay').classList.add('hidden');
         loadVaultData();
+        loadPasskeys();
       } else {
         throw new Error('No session token returned');
       }
@@ -598,6 +640,7 @@
           sessionStorage.setItem('vaultToken', result.token);
           document.getElementById('authOverlay').classList.add('hidden');
           loadVaultData();
+          loadPasskeys();
         } else {
           throw new Error(result.error || 'Auth failed');
         }
@@ -895,6 +938,169 @@
       let binary = '';
       for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
       return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    }
+
+    // Passkey management
+    async function loadPasskeys() {
+      try {
+        const res = await fetch('/api/manage/passkeys', {
+          headers: { 'Authorization': `Bearer ${sessionToken}` }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          renderPasskeys(data.credentials);
+        }
+      } catch (e) { console.error('Failed to load passkeys:', e); }
+    }
+
+    function renderPasskeys(credentials) {
+      const tbody = document.getElementById('passkeysTable');
+      const empty = document.getElementById('passkeysEmpty');
+      if (!credentials || credentials.length === 0) {
+        tbody.innerHTML = '';
+        empty.style.display = 'block';
+        return;
+      }
+      empty.style.display = 'none';
+      tbody.innerHTML = credentials.map((c, i) => `
+        <tr>
+          <td style="font-family: monospace; font-size: 12px;">${escapeHtml(c.id.substring(0, 24))}...</td>
+          <td>${new Date(c.createdAt).toLocaleString()}</td>
+          <td>${c.counter}</td>
+          <td>
+            ${credentials.length > 1 ? `<button class="btn btn-danger btn-sm" onclick="deletePasskey('${escapeHtml(c.id)}')">Delete</button>` : '<span style="color: var(--text-dim); font-size: 12px;">Primary</span>'}
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    async function registerAdditionalPasskey() {
+      try {
+        const optRes = await fetch('/api/manage/passkeys/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` }
+        });
+        if (!optRes.ok) throw new Error('Failed to get registration options');
+        const { options, challengeId } = await optRes.json();
+
+        const credential = await navigator.credentials.create({
+          publicKey: {
+            ...options,
+            challenge: base64ToBuffer(options.challenge),
+            user: { ...options.user, id: base64ToBuffer(options.user.id) },
+          },
+        });
+
+        const verifyRes = await fetch('/api/manage/passkeys/register/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
+          body: JSON.stringify({
+            challengeId,
+            response: {
+              id: credential.id,
+              rawId: bufferToBase64(credential.rawId),
+              type: credential.type,
+              response: {
+                clientDataJSON: bufferToBase64(credential.response.clientDataJSON),
+                attestationObject: bufferToBase64(credential.response.attestationObject),
+              },
+            },
+          }),
+        });
+        const result = await verifyRes.json();
+        if (result.success) {
+          alert('Passkey registered successfully!');
+          loadPasskeys();
+        } else {
+          alert('Failed: ' + (result.error || 'Unknown error'));
+        }
+      } catch (e) {
+        alert('Registration failed: ' + e.message);
+      }
+    }
+
+    async function deletePasskey(credentialId) {
+      if (!confirm('Delete this passkey?')) return;
+      const res = await fetch(`/api/manage/passkeys/${encodeURIComponent(credentialId)}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${sessionToken}` }
+      });
+      const result = await res.json();
+      if (result.success) {
+        loadPasskeys();
+      } else {
+        alert(result.error || 'Failed to delete passkey');
+      }
+    }
+
+    function showResetPasskeyForm() {
+      document.getElementById('resetPasskeyForm').style.display = 'block';
+      document.getElementById('resetPasskeyLink').style.display = 'none';
+      // Hide normal auth elements
+      document.getElementById('authBtn').style.display = 'none';
+      document.getElementById('authPassword').parentElement.style.display = 'none';
+    }
+
+    async function doResetPasskey() {
+      const password = document.getElementById('resetPassword').value;
+      if (!password) { showResetError('Password required'); return; }
+      try {
+        document.getElementById('resetError').style.display = 'none';
+        // Step 1: Verify password and get registration options
+        const res = await fetch('/api/manage/reset-passkey', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password }),
+        });
+        const data = await res.json();
+        if (!res.ok) { showResetError(data.error || 'Failed'); return; }
+
+        // Step 2: Create new passkey
+        const credential = await navigator.credentials.create({
+          publicKey: {
+            ...data.options,
+            challenge: base64ToBuffer(data.options.challenge),
+            user: { ...data.options.user, id: base64ToBuffer(data.options.user.id) },
+          },
+        });
+
+        // Step 3: Verify registration
+        const verifyRes = await fetch('/api/manage/reset-passkey/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            challengeId: data.challengeId,
+            resetToken: data.resetToken,
+            response: {
+              id: credential.id,
+              rawId: bufferToBase64(credential.rawId),
+              type: credential.type,
+              response: {
+                clientDataJSON: bufferToBase64(credential.response.clientDataJSON),
+                attestationObject: bufferToBase64(credential.response.attestationObject),
+              },
+            },
+          }),
+        });
+        const result = await verifyRes.json();
+        if (result.success) {
+          sessionToken = result.token;
+          sessionStorage.setItem('vaultToken', result.token);
+          document.getElementById('authOverlay').classList.add('hidden');
+          loadVaultData();
+          loadPasskeys();
+        } else {
+          showResetError(result.error || 'Failed');
+        }
+      } catch (e) {
+        showResetError(e.message);
+      }
+    }
+
+    function showResetError(msg) {
+      const el = document.getElementById('resetError');
+      el.textContent = msg;
+      el.style.display = 'block';
     }
 
     // Init

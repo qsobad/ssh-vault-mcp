@@ -153,26 +153,27 @@ export class WebAuthnManager {
    * Generate authentication options for Passkey verification
    */
   async generateAuthenticationOptions(
-    credentialId: string
+    credentialId: string | string[]
   ): Promise<{
     options: PublicKeyCredentialRequestOptionsJSON;
     challengeId: string;
   }> {
+    const credentialIds = Array.isArray(credentialId) ? credentialId : [credentialId];
     const options = await generateAuthenticationOptions({
       rpID: this.config.rpId,
-      allowCredentials: [{
-        id: base64ToBuffer(credentialId),
-        type: 'public-key',
+      allowCredentials: credentialIds.map(id => ({
+        id: base64ToBuffer(id),
+        type: 'public-key' as const,
         transports: ['internal', 'hybrid'] as AuthenticatorTransportFuture[],
-      }],
+      })),
       userVerification: 'required',
     });
 
     const challengeId = crypto.randomUUID();
     this.pendingAuthentications.set(challengeId, {
       challenge: options.challenge,
-      credentialId,
-      expiresAt: Date.now() + 5 * 60 * 1000, // 5 minutes
+      credentialId: credentialIds[0], // primary for backward compat
+      expiresAt: Date.now() + 5 * 60 * 1000,
     });
 
     return { 
