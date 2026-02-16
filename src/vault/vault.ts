@@ -483,8 +483,9 @@ export class VaultManager {
         await this.storage.save(fullVaultForAccess, this.currentSignature!);
         this.vault = this.stripCredentials(fullVaultForAccess);
         
-        // Create session for the agent
+        // Create session for the agent with approved hosts
         const session = this.createSession(req.fingerprint);
+        session.approvedHosts = [...agent.allowedHosts];
         
         // Emit event to listeners
         this.emitChallengeEvent(foundId, {
