@@ -78,6 +78,15 @@ export class WebServer {
       res.json({ status: 'ok' });
     });
 
+    // Password strength check (client-side feedback)
+    this.app.post('/api/password-strength', async (req: Request, res: Response) => {
+      const { password } = req.body;
+      if (!password) { res.json({ score: 0, warning: '', suggestions: [] }); return; }
+      const { validatePasswordStrength } = await import('../vault/encryption.js');
+      const result = validatePasswordStrength(password);
+      res.json({ score: result.score, warning: result.warning, suggestions: result.suggestions, valid: result.valid });
+    });
+
     // Create vault unlock challenge (for testing / agent use)
     this.app.post('/api/vault/unlock', (req: Request, res: Response) => {
       const agentFingerprint = req.body.agentFingerprint || 'SHA256:unknown-agent';
@@ -1310,8 +1319,12 @@ export class WebServer {
       }
     });
 
-    // Change master password
+    // Change master password (requires passkey verification)
     this.app.post('/api/manage/change-password', async (req: Request, res: Response) => {
+      if (!checkRateLimit(req.ip || 'unknown')) {
+        res.status(429).json({ error: 'Too many attempts. Try again later.' });
+        return;
+      }
       const token = req.headers.authorization?.replace('Bearer ', '');
       const session = token ? manageSessions.get(token) : null;
       if (!session || session.expiresAt < Date.now()) {
@@ -1319,13 +1332,50 @@ export class WebServer {
         return;
       }
       try {
-        const { currentPassword, newPassword } = req.body;
+        const { currentPassword, newPassword, challengeId, response: webauthnResponse } = req.body;
         if (!currentPassword || !newPassword) {
           res.status(400).json({ error: 'Both currentPassword and newPassword required' });
           return;
         }
-        if (newPassword.length < 8) {
-          res.status(400).json({ error: 'New password must be at least 8 characters' });
+
+        // Require passkey verification
+        if (!challengeId || !webauthnResponse) {
+          res.status(400).json({ error: 'Passkey verification required (challengeId and response)' });
+          return;
+        }
+
+        // Verify WebAuthn FIRST
+        const metadata = await this.vaultManager.getMetadata();
+        if (!metadata) {
+          res.status(404).json({ error: 'No vault found' });
+          return;
+        }
+        const allCredentials = metadata.credentials;
+        let webauthnResult: any = { success: false, error: 'No matching credential' };
+        for (const cred of allCredentials) {
+          webauthnResult = await this.webauthn.verifyAuthentication(
+            challengeId,
+            webauthnResponse,
+            {
+              id: cred.id,
+              publicKey: cred.publicKey,
+              algorithm: cred.algorithm,
+              counter: 0,
+              createdAt: 0,
+            }
+          );
+          if (webauthnResult.success) break;
+        }
+        if (!webauthnResult.success) {
+          res.status(401).json({ error: webauthnResult.error || 'Passkey verification failed' });
+          return;
+        }
+
+        // Check new password strength with zxcvbn
+        const { deriveKeyFromPassword, generateSalt, toBase64, fromBase64, secureWipe, validatePasswordStrength } = await import('../vault/encryption.js');
+        const strengthCheck = validatePasswordStrength(newPassword);
+        if (!strengthCheck.valid) {
+          res.status(400).json({ error: 'Weak password', details: strengthCheck.errors, score: strengthCheck.score, suggestions: strengthCheck.suggestions });
           return;
         }
 
@@ -1335,7 +1385,6 @@ export class WebServer {
           res.status(404).json({ error: 'No vault found' });
           return;
         }
-        const { deriveKeyFromPassword, generateSalt, toBase64, fromBase64, secureWipe } = await import('../vault/encryption.js');
         const oldSalt = fromBase64(authMeta.passwordSalt);
         const oldVek = deriveKeyFromPassword(currentPassword, oldSalt, authMeta.kdfParams);
 
@@ -1364,7 +1413,7 @@ export class WebServer {
         // Wipe old VEK
         secureWipe(oldVek);
 
-        console.error('[manage] Master password changed successfully');
+        console.error('[manage] Master password changed successfully (with passkey verification)');
         res.json({ success: true });
       } catch (error) {
         res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to change password' });

@@ -5,6 +5,7 @@
 
 import nacl from 'tweetnacl';
 import { argon2id } from '@noble/hashes/argon2.js';
+import zxcvbn from 'zxcvbn';
 
 /**
  * KDF (Key Derivation Function) parameters for Argon2id.
@@ -123,27 +124,28 @@ export function deriveKeyFromPassword(
  */
 export function validatePasswordStrength(password: string): {
   valid: boolean;
+  score: number;
+  warning: string;
+  suggestions: string[];
   errors: string[];
 } {
+  const result = zxcvbn(password);
   const errors: string[] = [];
 
-  if (password.length < 12) {
-    errors.push('Password must be at least 12 characters long');
+  if (password.length < 8) {
+    errors.push('Password must be at least 8 characters long');
   }
-  if (!/[a-z]/.test(password)) {
-    errors.push('Password must contain at least one lowercase letter');
-  }
-  if (!/[A-Z]/.test(password)) {
-    errors.push('Password must contain at least one uppercase letter');
-  }
-  if (!/[0-9]/.test(password)) {
-    errors.push('Password must contain at least one digit');
-  }
-  if (!/[^a-zA-Z0-9]/.test(password)) {
-    errors.push('Password must contain at least one special character');
+  if (result.score < 3) {
+    errors.push(`Password too weak (strength ${result.score}/4). ${result.feedback.warning || 'Choose a stronger password.'}`);
   }
 
-  return { valid: errors.length === 0, errors };
+  return {
+    valid: errors.length === 0,
+    score: result.score,
+    warning: result.feedback.warning || '',
+    suggestions: result.feedback.suggestions || [],
+    errors,
+  };
 }
 
 /**

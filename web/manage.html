@@ -260,7 +260,11 @@
       <p id="authStatus">Authenticate to access vault</p>
       <div class="form-group" style="text-align: left; margin-bottom: 16px;">
         <label style="color: var(--text-dim);">Master Password</label>
-        <input type="password" id="authPassword" placeholder="Enter master password" style="width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px;">
+        <input type="password" id="authPassword" placeholder="Enter master password" oninput="if(!vaultExists) checkSetupPasswordStrength(this.value)" style="width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px;">
+        <div id="setupStrengthBar" style="margin-top: 6px; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; display: none;">
+          <div id="setupStrengthFill" style="height: 100%; width: 0%; transition: all 0.3s;"></div>
+        </div>
+        <div id="setupStrengthText" style="font-size: 12px; margin-top: 4px; color: var(--text-dim);"></div>
       </div>
       <button class="btn btn-primary" id="authBtn" onclick="doAuth()" style="width: 100%; padding: 14px;">
         👆 Use Passkey
@@ -411,14 +415,18 @@
         </div>
         <div class="form-group" style="margin-top: 12px;">
           <label style="color: var(--text-dim);">New Password</label>
-          <input type="password" id="newPasswordInput" placeholder="Min 8 characters" style="width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px;">
+          <input type="password" id="newPasswordInput" placeholder="Min 8 characters" oninput="checkPasswordStrength(this.value)" style="width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px;">
+          <div id="passwordStrengthBar" style="margin-top: 6px; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden;">
+            <div id="passwordStrengthFill" style="height: 100%; width: 0%; transition: all 0.3s;"></div>
+          </div>
+          <div id="passwordStrengthText" style="font-size: 12px; margin-top: 4px; color: var(--text-dim);"></div>
         </div>
         <div class="form-group" style="margin-top: 12px;">
           <label style="color: var(--text-dim);">Confirm New Password</label>
           <input type="password" id="confirmPasswordInput" placeholder="Re-enter new password" style="width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px;">
         </div>
         <button class="btn btn-primary" onclick="changePassword()" style="width: 100%; margin-top: 16px; padding: 14px;">
-          🔑 Change Password
+          🔑 Change Password (requires Passkey)
         </button>
         <div id="changePasswordStatus" style="text-align: center; margin-top: 12px; font-size: 13px; display: none;"></div>
       </div>
@@ -595,6 +603,32 @@
       const div = document.createElement('div');
       div.textContent = str;
       return div.innerHTML;
+    }
+
+    let setupStrengthTimeout;
+    async function checkSetupPasswordStrength(password) {
+      const bar = document.getElementById('setupStrengthBar');
+      const fill = document.getElementById('setupStrengthFill');
+      const text = document.getElementById('setupStrengthText');
+      if (!password) { bar.style.display = 'none'; text.textContent = ''; return; }
+      bar.style.display = 'block';
+      clearTimeout(setupStrengthTimeout);
+      setupStrengthTimeout = setTimeout(async () => {
+        try {
+          const res = await fetch('/api/password-strength', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password }),
+          });
+          const data = await res.json();
+          const colors = ['#ef4444', '#f59e0b', '#f59e0b', '#22c55e', '#22c55e'];
+          const labels = ['Very Weak', 'Weak', 'Fair', 'Strong', 'Very Strong'];
+          fill.style.width = `${(data.score + 1) * 20}%`;
+          fill.style.background = colors[data.score];
+          text.style.color = colors[data.score];
+          text.textContent = labels[data.score] + (data.warning ? ` — ${data.warning}` : '');
+        } catch (_) {}
+      }, 300);
     }
 
     // Check auth on load
@@ -1031,6 +1065,30 @@
       loadVaultData();
     }
 
+    let strengthCheckTimeout;
+    async function checkPasswordStrength(password) {
+      clearTimeout(strengthCheckTimeout);
+      const fill = document.getElementById('passwordStrengthFill');
+      const text = document.getElementById('passwordStrengthText');
+      if (!password) { fill.style.width = '0%'; text.textContent = ''; return; }
+      strengthCheckTimeout = setTimeout(async () => {
+        try {
+          const res = await fetch('/api/password-strength', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password }),
+          });
+          const data = await res.json();
+          const colors = ['#ef4444', '#f59e0b', '#f59e0b', '#22c55e', '#22c55e'];
+          const labels = ['Very Weak', 'Weak', 'Fair', 'Strong', 'Very Strong'];
+          fill.style.width = `${(data.score + 1) * 20}%`;
+          fill.style.background = colors[data.score];
+          text.style.color = colors[data.score];
+          text.textContent = labels[data.score] + (data.warning ? ` — ${data.warning}` : '');
+        } catch (_) {}
+      }, 300);
+    }
+
     async function changePassword() {
       const currentPassword = document.getElementById('currentPasswordInput').value;
       const newPassword = document.getElementById('newPasswordInput').value;
@@ -1056,14 +1114,52 @@
         return;
       }
 
+      statusEl.style.display = 'block';
+      statusEl.style.color = 'var(--warning)';
+      statusEl.textContent = '👆 Please authenticate with your Passkey...';
+
       try {
+        // Step 1: Get WebAuthn challenge
+        const optionsRes = await fetch('/api/auth/options', { method: 'POST' });
+        if (!optionsRes.ok) throw new Error('Failed to get passkey options');
+        const { options, challengeId } = await optionsRes.json();
+
+        // Step 2: Get passkey credential
+        const credential = await navigator.credentials.get({
+          publicKey: {
+            ...options,
+            challenge: base64ToBuffer(options.challenge),
+            allowCredentials: options.allowCredentials?.map(c => ({
+              ...c, id: base64ToBuffer(c.id)
+            }))
+          }
+        });
+
+        statusEl.textContent = '⏳ Changing password...';
+
+        // Step 3: Submit with passkey response
         const res = await fetch('/api/manage/change-password', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${manageToken}`,
+            'Authorization': `Bearer ${sessionToken}`,
           },
-          body: JSON.stringify({ currentPassword, newPassword }),
+          body: JSON.stringify({
+            currentPassword,
+            newPassword,
+            challengeId,
+            response: {
+              id: credential.id,
+              rawId: bufferToBase64(credential.rawId),
+              type: credential.type,
+              response: {
+                clientDataJSON: bufferToBase64(credential.response.clientDataJSON),
+                authenticatorData: bufferToBase64(credential.response.authenticatorData),
+                signature: bufferToBase64(credential.response.signature),
+                userHandle: credential.response.userHandle ? bufferToBase64(credential.response.userHandle) : null
+              }
+            }
+          }),
         });
         const data = await res.json();
         statusEl.style.display = 'block';
@@ -1073,14 +1169,16 @@
           document.getElementById('currentPasswordInput').value = '';
           document.getElementById('newPasswordInput').value = '';
           document.getElementById('confirmPasswordInput').value = '';
+          document.getElementById('passwordStrengthFill').style.width = '0%';
+          document.getElementById('passwordStrengthText').textContent = '';
         } else {
           statusEl.style.color = 'var(--error)';
-          statusEl.textContent = data.error || 'Failed to change password';
+          statusEl.textContent = data.details ? data.details.join('; ') : (data.error || 'Failed to change password');
         }
       } catch (err) {
         statusEl.style.display = 'block';
         statusEl.style.color = 'var(--error)';
-        statusEl.textContent = 'Network error';
+        statusEl.textContent = err.name === 'NotAllowedError' ? 'Passkey verification cancelled' : (err.message || 'Network error');
       }
     }
 
