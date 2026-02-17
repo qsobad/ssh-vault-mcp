@@ -9,11 +9,14 @@ SSH Vault MCP provides secure, human-approved SSH access. Credentials are encryp
 ## Security Model
 
 - **Encryption**: Argon2id(Master Password) → VEK → XSalsa20-Poly1305
+- **KDF**: Argon2id with t=3, m=64MB, p=1 (default parameters)
 - **Auth**: Passkey (WebAuthn) for human, Ed25519 signatures for agents
 - **Credentials**: Never in memory as plaintext — decrypted on-demand per command, wiped immediately after
 - **Auto-lock**: Vault locks after 15 min inactivity, VEK wiped from memory
 - **Policy**: Global command whitelist/blacklist + shell injection detection
 - **Rate limiting**: 5 attempts/IP/5min on all auth endpoints
+- **Approval expiry**: All challenge/approval links expire after 5 minutes
+- **Password strength**: zxcvbn validation on registration and password change
 
 ## Agent Setup
 
@@ -39,7 +42,48 @@ Store as JSON:
 }
 ```
 
-### 2. Request Access
+### 2. Register Agent (Recommended: Agent-Initiated)
+
+```bash
+curl -X POST https://ssh.29cp.cn/api/agent/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-agent",
+    "publicKey": "BASE64_PUBLIC_KEY"
+  }'
+```
+
+Response:
+```json
+{
+  "status": "pending_approval",
+  "challengeId": "xxx",
+  "approvalUrl": "https://ssh.29cp.cn/agent-register?id=xxx",
+  "listenUrl": "https://ssh.29cp.cn/api/agent/register/xxx/listen"
+}
+```
+
+User visits `approvalUrl` → Passkey auth + Master Password → configures permissions → approves.
+
+**⚠️ Approval link expires in 5 minutes!**
+
+### 2b. Request Host Addition (Agent-Initiated)
+
+```bash
+curl -X POST https://ssh.29cp.cn/api/agent/request-host \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "prod-01",
+    "hostname": "192.168.1.100",
+    "port": 22,
+    "username": "deploy",
+    "authType": "key"
+  }'
+```
+
+User visits approval URL → Passkey auth + Master Password → provides SSH credential → approves.
+
+### 2c. Request Access (Legacy)
 
 ```bash
 curl -X POST https://ssh.29cp.cn/api/agent/request-access \
@@ -49,16 +93,6 @@ curl -X POST https://ssh.29cp.cn/api/agent/request-access \
     "publicKey": "BASE64_PUBLIC_KEY",
     "requestedHosts": ["s1"]
   }'
-```
-
-Response:
-```json
-{
-  "status": "pending_approval",
-  "approvalUrl": "https://ssh.29cp.cn/request-access?challenge=xxx",
-  "listenUrl": "https://ssh.29cp.cn/api/challenge/xxx/listen",
-  "challengeId": "xxx"
-}
 ```
 
 User visits `approvalUrl` → Passkey auth → approves → agent gets session.

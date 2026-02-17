@@ -5,13 +5,19 @@ A secure SSH credential vault with [MCP](https://modelcontextprotocol.io/) (Mode
 ## Features
 
 - 🔐 **Passkey + Master Password**: Passkey for identity, Master Password for encryption
-- 🔒 **Strong Encryption**: Argon2id key derivation + XSalsa20-Poly1305 (tweetnacl)
+- 🔒 **Strong Encryption**: Argon2id key derivation (t=3, m=64MB, p=1) + XSalsa20-Poly1305 (tweetnacl)
 - 🤖 **MCP Interface**: AI agents access SSH through standardized tools
 - ✍️ **Ed25519 Agent Signatures**: Every request cryptographically signed
 - 📋 **Policy Engine**: Command whitelist/blacklist + shell injection detection
 - ⏱️ **Auto-lock**: Vault locks after 15 min inactivity, VEK wiped from memory
 - 🔑 **On-demand Decryption**: Credentials decrypted per-command, never held in memory
 - 🚫 **No Proxy**: Vault handles auth — SSH runs server-side, not through agent
+- 🤖 **Agent-Initiated Registration**: Agents can self-register, pending user Passkey + password approval
+- 🖥️ **Agent-Initiated Host Addition**: Agents can request new hosts, pending user approval
+- 🔄 **Change Master Password**: Requires Passkey verification, re-encrypts entire vault
+- 💪 **Password Strength Check**: zxcvbn-based strength validation with real-time feedback
+- 📱 **Responsive Design**: Mobile-friendly UI, works on phones and tablets
+- ⏳ **5-Minute Approval Links**: All approval/challenge links expire after 5 minutes
 
 ## Architecture
 
@@ -178,6 +184,7 @@ Store the keypair securely. The agent uses it to sign all MCP requests.
 
 ### Encryption
 - **At rest**: Argon2id(Master Password, salt) → VEK → XSalsa20-Poly1305
+- **KDF parameters**: t=3 (iterations), m=64MB (memory), p=1 (parallelism) — Argon2id
 - **Vault file**: `0600` permissions
 - **On-demand**: Credentials decrypted per command, wiped immediately
 
@@ -186,12 +193,19 @@ Store the keypair securely. The agent uses it to sign all MCP requests.
 - **No plaintext in memory**: Credential placeholders only
 - **30s nonce window**: Replay protection
 - **Rate limiting**: 5 attempts/IP/5min on auth endpoints
+- **Approval link expiry**: All challenge/approval links expire after 5 minutes
+- **Password strength**: zxcvbn validation enforced on registration and password change
 
 ### Policy Engine
 - Command whitelist/blacklist (global + per-agent)
 - Dangerous pattern detection (`rm -rf /`, `mkfs`, `dd`, fork bombs)
 - Shell injection blocking (`|`, `;`, `&&`, `||`, `>`, `` ` ``, `$()`)
 - Timeout limits: 1-300s
+
+### Agent-Initiated Flows
+- **Registration**: Agent calls `POST /api/agent/register` → user receives approval link → authenticates with Passkey + enters master password → agent is registered
+- **Host Addition**: Agent calls `POST /api/agent/request-host` → user receives approval link → authenticates with Passkey + enters master password → host is added to vault
+- **Password Change**: Requires Passkey verification before re-encrypting vault with new password
 
 ## HTTP API
 
@@ -201,11 +215,21 @@ Store the keypair securely. The agent uses it to sign all MCP requests.
 | POST | `/api/vault/execute` | Execute SSH command (signed) |
 | POST | `/api/vault/submit-unlock` | Submit unlock code |
 | POST | `/api/agent/request-access` | Request host access |
+| POST | `/api/agent/register` | Agent-initiated registration (pending approval) |
+| GET | `/api/agent/register/:id/listen` | SSE listener for registration approval |
+| POST | `/api/agent/register/:id/approve` | Approve agent registration (Passkey + password) |
+| POST | `/api/agent/register/:id/reject` | Reject agent registration |
+| POST | `/api/agent/request-host` | Agent-initiated host addition (pending approval) |
+| GET | `/api/agent/request-host/:id/listen` | SSE listener for host request approval |
+| POST | `/api/agent/request-host/:id/approve` | Approve host addition (Passkey + password) |
+| POST | `/api/agent/request-host/:id/reject` | Reject host addition |
 | GET | `/api/challenge/:id/listen` | SSE approval notifications |
 | POST | `/api/auth/options` | Passkey auth options |
 | POST | `/api/auth/verify` | Passkey auth verify |
 | GET | `/api/manage/data` | List hosts/agents (authed) |
 | POST | `/api/manage/hosts` | Add host (authed) |
+| POST | `/api/manage/change-password` | Change master password (Passkey required) |
+| POST | `/api/password-strength` | Check password strength (zxcvbn) |
 
 ## Development
 

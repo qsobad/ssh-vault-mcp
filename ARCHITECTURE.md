@@ -163,6 +163,118 @@ Agent              MCP Server         签名页面          User
   │        ...         │                 │               │
 ```
 
+### 3. Agent 发起注册（用户审批）
+
+```
+Agent              MCP Server         审批页面          User
+  │                    │                 │               │
+  │ POST /api/agent/   │                 │               │
+  │   register         │                 │               │
+  │ { name, publicKey }│                 │               │
+  │ ────────────────────►                │               │
+  │                    │                 │               │
+  │  生成 challengeId  │                 │               │
+  │  (5分钟有效)       │                 │               │
+  │                    │                 │               │
+  │◄──────────────────── │                │               │
+  │ { approvalUrl,     │                 │               │
+  │   listenUrl }      │                 │               │
+  │                    │                 │               │
+  │ SSE 监听 listenUrl │                 │               │
+  │ ────────────────────►                │               │
+  │                    │                 │               │
+  │ "请访问此链接审批"  │                 │               │
+  │ ──────────────────────────────────────────────────────►
+  │                    │                 │               │
+  │                    │                 │  打开审批页面  │
+  │                    │                 │ ◄──────────────
+  │                    │                 │               │
+  │                    │                 │  1. Passkey    │
+  │                    │                 │     验证       │
+  │                    │                 │  2. 输入 Master│
+  │                    │                 │     Password   │
+  │                    │                 │  3. 配置权限   │
+  │                    │                 │ ◄──────────────
+  │                    │                 │               │
+  │                    │  审批通过        │               │
+  │                    │  注册 Agent     │               │
+  │                    │ ◄─────────────── │               │
+  │                    │                 │               │
+  │◄──────────────────── │                │               │
+  │ SSE: { approved }   │                │               │
+```
+
+### 4. Agent 发起添加 Host（用户审批）
+
+```
+Agent              MCP Server         审批页面          User
+  │                    │                 │               │
+  │ POST /api/agent/   │                 │               │
+  │   request-host     │                 │               │
+  │ { name, hostname,  │                 │               │
+  │   port, username,  │                 │               │
+  │   authType }       │                 │               │
+  │ ────────────────────►                │               │
+  │                    │                 │               │
+  │  生成 challengeId  │                 │               │
+  │  (5分钟有效)       │                 │               │
+  │                    │                 │               │
+  │◄──────────────────── │                │               │
+  │ { approvalUrl,     │                 │               │
+  │   listenUrl }      │                 │               │
+  │                    │                 │               │
+  │ SSE 监听 listenUrl │                 │               │
+  │ ────────────────────►                │               │
+  │                    │                 │               │
+  │ "请访问此链接审批"  │                 │               │
+  │ ──────────────────────────────────────────────────────►
+  │                    │                 │               │
+  │                    │                 │  打开审批页面  │
+  │                    │                 │ ◄──────────────
+  │                    │                 │               │
+  │                    │                 │  1. Passkey    │
+  │                    │                 │     验证       │
+  │                    │                 │  2. 输入 Master│
+  │                    │                 │     Password   │
+  │                    │                 │  3. 输入凭证   │
+  │                    │                 │     (密码/私钥)│
+  │                    │                 │ ◄──────────────
+  │                    │                 │               │
+  │                    │  审批通过        │               │
+  │                    │  添加 Host      │               │
+  │                    │ ◄─────────────── │               │
+  │                    │                 │               │
+  │◄──────────────────── │                │               │
+  │ SSE: { approved }   │                │               │
+```
+
+### 5. 修改 Master Password
+
+```
+User               Web UI             MCP Server
+  │                    │                 │
+  │ 点击 Change        │                 │
+  │   Password         │                 │
+  │ ────────────────────►                │
+  │                    │                 │
+  │                    │ POST /api/manage│
+  │                    │  /change-password
+  │                    │ { Passkey +     │
+  │                    │   oldPassword + │
+  │                    │   newPassword } │
+  │                    │ ────────────────►
+  │                    │                 │
+  │                    │  1. 验证 Passkey │
+  │                    │  2. 验证旧密码   │
+  │                    │  3. zxcvbn 检查  │
+  │                    │     新密码强度   │
+  │                    │  4. 重新加密 Vault│
+  │                    │     (新 KDF 参数) │
+  │                    │                 │
+  │                    │◄────────────────│
+  │◄──────────────────── │  成功           │
+```
+
 ---
 
 ## 数据结构
@@ -574,11 +686,19 @@ logging:
 - ✅ 硬件安全模块 (Secure Enclave / TPM)
 - ✅ 生物识别 (Face ID / 指纹)
 
+### 已实现 (新增)
+- ✅ 速率限制 (5 attempts/IP/5min)
+- ✅ 多 Passkey 支持
+- ✅ Agent 发起注册 (用户审批)
+- ✅ Agent 发起添加 Host (用户审批)
+- ✅ 修改 Master Password (需 Passkey 验证)
+- ✅ zxcvbn 密码强度检查
+- ✅ 响应式设计 (移动端适配)
+- ✅ 所有审批链接 5 分钟有效
+
 ### 待实现
 - ⏳ 审计日志
-- ⏳ 速率限制
 - ⏳ IP 白名单
-- ⏳ 多 Passkey 支持 (备用设备)
 - ⏳ 恢复机制 (Passkey 丢失时)
 
 ### 安全模型
@@ -597,19 +717,29 @@ Passkey 设备丢失                需要恢复机制 ⚠️
 
 ## 下一步
 
-1. [ ] 初始化项目 + 依赖
-2. [ ] 实现 Vault 加密存储 (libsodium)
-3. [ ] 实现 Policy Engine (规则匹配)
-4. [ ] 实现 WebAuthn/Passkey 验证
-5. [ ] 实现 MCP Server + Tools
-6. [ ] 签名页面 (Web + Passkey)
-7. [ ] SSH 连接执行模块
-8. [ ] Docker 打包
-9. [ ] SKILL.md 编写
-10. [ ] 测试
+1. [x] 初始化项目 + 依赖
+2. [x] 实现 Vault 加密存储 (Argon2id + XSalsa20)
+3. [x] 实现 Policy Engine (规则匹配)
+4. [x] 实现 WebAuthn/Passkey 验证
+5. [x] 实现 MCP Server + Tools
+6. [x] 签名页面 (Web + Passkey)
+7. [x] SSH 连接执行模块
+8. [x] Docker 打包
+9. [x] SKILL.md 编写
+10. [x] Agent 发起注册 + 审批流程
+11. [x] Agent 发起添加 Host + 审批流程
+12. [x] 修改 Master Password (Passkey 验证 + zxcvbn)
+13. [x] 响应式设计 (移动端适配)
+14. [x] 速率限制
+15. [x] 多 Passkey 支持
+16. [ ] 审计日志
+17. [ ] IP 白名单
+18. [ ] Passkey 丢失恢复机制
 
 ---
 
 ## 版本
 
 - v0.1.0 - 初始架构设计
+- v0.2.0 - 核心功能实现 (Vault, MCP, WebAuthn, SSH, Policy)
+- v0.3.0 - Agent-initiated registration & host addition, change password, zxcvbn, responsive design

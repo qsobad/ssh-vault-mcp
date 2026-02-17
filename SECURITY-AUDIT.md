@@ -946,4 +946,70 @@ Each team performed line-by-line review of all relevant source files (~3,500 LOC
 
 ---
 
+## Remediation Status Update (2026-02-17)
+
+The following security improvements have been implemented since the initial audit:
+
+### Resolved / Mitigated
+
+| ID | Finding | Status | Notes |
+|----|---------|--------|-------|
+| CRITICAL-01 | Hardcoded VEK | **FIXED** | VEK now derived from actual Master Password via Argon2id (t=3, m=64MB, p=1) |
+| CRITICAL-02 | File permissions | **FIXED** | Vault file written with `0o600` permissions |
+| CRITICAL-03 | Unprotected registration | **MITIGATED** | Agent registration now requires user Passkey + Master Password approval; vault existence checked |
+| HIGH-03 | Weak unlock codes | **IMPROVED** | Rate limiting added (5 attempts/IP/5min) |
+| HIGH-12 | MCP SDK version | **FIXED** | Pinned to patched version |
+| MEDIUM-08 | Bind to 0.0.0.0 | **MITIGATED** | Documented reverse proxy requirement for production |
+| MEDIUM-14 | Security headers | **IMPROVED** | Basic security headers added |
+| MEDIUM-15 | Rate limiting on auth | **FIXED** | Rate limiting on all auth endpoints (5/IP/5min) |
+
+### New Security Measures Added
+
+| Feature | Description |
+|---------|-------------|
+| **Agent-Initiated Registration** | `POST /api/agent/register` — agent requests registration, but user must approve via Passkey + Master Password. Approval link expires in 5 minutes. |
+| **Agent-Initiated Host Addition** | `POST /api/agent/request-host` — agent requests host, user approves with Passkey + password. Credential (SSH key/password) entered only by user, never by agent. 5-minute expiry. |
+| **Change Master Password** | Requires Passkey verification + old password verification. Vault re-encrypted with new password using DEFAULT_KDF_PARAMS (t=3, m=64MB, p=1). |
+| **zxcvbn Password Strength** | Password strength validated via zxcvbn on registration and password change. Weak passwords rejected. |
+| **Password Strength API** | `POST /api/password-strength` — real-time password strength feedback for UI. |
+| **5-Minute Approval Expiry** | All challenge/approval links (unlock, registration, host addition) expire after 5 minutes, reducing window for approval fatigue attacks. |
+| **Responsive Design** | Mobile-friendly UI allows secure approval from phones (important for Passkey on mobile devices). |
+
+### Security Analysis of New Features
+
+#### Agent-Initiated Registration
+- **Threat**: Malicious agent could spam registration requests (approval fatigue)
+- **Mitigation**: 5-minute expiry on approval links; rate limiting on endpoint
+- **Residual Risk**: Low — user must actively authenticate with Passkey + enter master password
+
+#### Agent-Initiated Host Addition
+- **Threat**: Agent could request addition of attacker-controlled hosts
+- **Mitigation**: User must review host details, provide credentials, and authenticate with Passkey
+- **Residual Risk**: Low — credentials are entered only by user, agent never sees them
+
+#### Change Master Password
+- **Threat**: Unauthorized password change locks out legitimate user
+- **Mitigation**: Requires Passkey verification (biometric) + old password
+- **Residual Risk**: Very low — requires both knowledge factor and possession factor
+
+#### zxcvbn Password Strength
+- **Benefit**: Prevents weak master passwords that could be brute-forced offline
+- **Implementation**: Server-side validation + client-side real-time feedback
+- **KDF hardening**: Argon2id with t=3, m=64MB provides additional brute-force resistance
+
+### Remaining Open Issues
+
+The following findings from the original audit remain unresolved:
+
+- CRITICAL-04: No built-in TLS (mitigated by reverse proxy in deployment)
+- CRITICAL-05: SSH host key verification not implemented
+- HIGH-01: Nonce cleanup still clears all at once
+- HIGH-02: WebAuthn counter not persisted
+- HIGH-04: Unlock code not bound to requesting agent
+- HIGH-09/10: DOM XSS in approval and management pages
+- HIGH-11: No SSH algorithm restrictions
+- HIGH-13/14: Command injection and policy bypass vectors
+
+---
+
 *End of Security Audit Report*

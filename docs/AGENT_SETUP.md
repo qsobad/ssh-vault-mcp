@@ -30,7 +30,36 @@ fs.writeFileSync('.ssh-vault-key', JSON.stringify({
 
 **⚠️ Store the privateKey securely!** It's needed to sign all requests.
 
-## 2. Request Access
+## 2. Register Agent (Two Options)
+
+### Option A: Agent-Initiated Registration (Recommended)
+
+The agent registers itself, and the user approves via Passkey + Master Password:
+
+```bash
+curl -X POST https://ssh.29cp.cn/api/agent/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "clawdbot",
+    "publicKey": "YOUR_PUBLIC_KEY"
+  }'
+```
+
+Response:
+```json
+{
+  "status": "pending_approval",
+  "challengeId": "xxx",
+  "approvalUrl": "https://ssh.29cp.cn/agent-register?id=xxx",
+  "listenUrl": "https://ssh.29cp.cn/api/agent/register/xxx/listen"
+}
+```
+
+**⚠️ Approval link expires in 5 minutes!**
+
+The agent listens on `listenUrl` (SSE) for the approval event. The user opens `approvalUrl`, authenticates with Passkey, enters Master Password, configures agent permissions, and approves.
+
+### Option B: Request Access (Legacy)
 
 ```bash
 curl -X POST https://ssh.29cp.cn/api/agent/request-access \
@@ -53,6 +82,36 @@ Response:
 ```
 
 **User clicks approvalUrl → authenticates with Passkey → approves access.**
+
+## 3. Request Host Addition (Agent-Initiated)
+
+Agents can request new SSH hosts to be added to the vault:
+
+```bash
+curl -X POST https://ssh.29cp.cn/api/agent/request-host \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "prod-web-01",
+    "hostname": "192.168.1.100",
+    "port": 22,
+    "username": "deploy",
+    "authType": "key"
+  }'
+```
+
+Response:
+```json
+{
+  "status": "pending_approval",
+  "challengeId": "yyy",
+  "approvalUrl": "https://ssh.29cp.cn/agent-request-host?id=yyy",
+  "listenUrl": "https://ssh.29cp.cn/api/agent/request-host/yyy/listen"
+}
+```
+
+**⚠️ Approval link expires in 5 minutes!**
+
+The user opens `approvalUrl`, authenticates with Passkey, enters Master Password, provides the SSH credential (password or private key), and approves. The agent never sees the credential.
 
 ## 3. Sign Requests
 
@@ -108,7 +167,7 @@ async function signRequest(tool, args, privateKey) {
 }
 ```
 
-## 4. Available Tools
+## 5. Available Tools
 
 | Tool | Description | Signed? |
 |------|-------------|---------|
@@ -118,6 +177,16 @@ async function signRequest(tool, args, privateKey) {
 | `submit_unlock` | Submit unlock code | Yes |
 | `list_hosts` | List available hosts | Yes |
 | `execute_command` | Run SSH command | Yes |
+
+## HTTP API Endpoints (Agent-Initiated)
+
+| Method | Endpoint | Description | Auth |
+|--------|----------|-------------|------|
+| POST | `/api/agent/register` | Register agent (pending approval) | None |
+| GET | `/api/agent/register/:id/listen` | SSE for registration status | None |
+| POST | `/api/agent/request-host` | Request host addition (pending approval) | None |
+| GET | `/api/agent/request-host/:id/listen` | SSE for host request status | None |
+| POST | `/api/password-strength` | Check password strength | None |
 
 ## 5. Execute Command Flow
 
