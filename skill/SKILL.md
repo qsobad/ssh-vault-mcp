@@ -1,48 +1,37 @@
 ---
 name: ssh-vault
-description: Secure SSH access through a Passkey-protected vault. Agent connects to a vault server (self-hosted or managed), registers via chat approval, and executes SSH commands with human oversight. Use when you need SSH access to servers, want to set up secure credential management, or need to run remote commands.
+description: Secure SSH access through a Passkey-protected vault. Agent connects to a vault server (self-hosted or local MCP), registers via chat approval, and executes SSH commands with human oversight. Use when you need SSH access to servers, want to set up secure credential management, or need to run remote commands.
 ---
 
 # SSH Vault
 
-Secure SSH for AI agents. Credentials stay encrypted — you approve every action via Passkey on your phone.
+Secure SSH for AI agents. Credentials stay encrypted — user approves every action via Passkey.
 
 ## Connection Modes
 
-### Mode 1: Self-Hosted Docker
-User runs their own vault. Install it for them:
+### Mode 1: Self-Hosted Docker (User installs)
+
+User installs the vault themselves with one command:
 
 ```bash
-# Check if already running
-docker ps --filter name=ssh-vault --format '{{.Names}}'
-
-# If not, install:
-docker pull qsobad/ssh-vault-mcp:latest
-
-# Generate config (ask user for domain, or use localhost)
-cat > /tmp/ssh-vault-config.yml << 'EOF'
-webauthn:
-  rpId: "DOMAIN"
-  rpName: "SSH Vault"
-  origin: "https://DOMAIN"
-web:
-  port: 3001
-  external_url: "https://DOMAIN"
-EOF
-
-# Start
-docker run -d --name ssh-vault --restart unless-stopped \
-  -p 3001:3001 \
-  -v ssh-vault-data:/app/data \
-  -v /tmp/ssh-vault-config.yml:/app/config.yml:ro \
-  -e SSH_VAULT_CONFIG=/app/config.yml \
-  qsobad/ssh-vault-mcp:latest
+curl -fsSL https://raw.githubusercontent.com/qsobad/ssh-vault-mcp/main/install.sh | bash
 ```
 
-After starting, send user the URL to set up Master Password + Passkey.
+The script asks for domain, generates config, pulls Docker image, and starts the vault.
 
-### Mode 2: Local MCP (Claude Desktop / Cursor)
-For non-OpenClaw agents. User adds to their MCP config:
+After install, user:
+1. Opens the vault URL in browser
+2. Sets Master Password + registers Passkey
+3. Gives you the vault URL to connect
+
+**To connect as agent:** follow "Agent Registration" below.
+
+### Mode 2: Local MCP (Agent helps configure)
+
+For Claude Desktop, Cursor, or other MCP clients. Help user add to their config:
+
+**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
@@ -53,7 +42,7 @@ For non-OpenClaw agents. User adds to their MCP config:
         "run", "-i", "--rm",
         "-p", "3001:3001",
         "-v", "ssh-vault-data:/app/data",
-        "-v", "/path/to/config.yml:/app/config.yml:ro",
+        "-v", "CONFIG_PATH:/app/config.yml:ro",
         "-e", "SSH_VAULT_CONFIG=/app/config.yml",
         "qsobad/ssh-vault-mcp:latest"
       ]
@@ -62,16 +51,23 @@ For non-OpenClaw agents. User adds to their MCP config:
 }
 ```
 
-## Chat-Driven Setup
+Help user create `config.yml`:
+```yaml
+webauthn:
+  rpId: "localhost"
+  rpName: "SSH Vault"
+  origin: "http://localhost:3001"
+web:
+  port: 3001
+  external_url: "http://localhost:3001"
+```
 
-All approval happens through chat. Never ask for passwords.
+Then restart their MCP client. Vault UI at `http://localhost:3001`.
 
-### Step 1: Determine vault URL
-Ask user: "Do you have an SSH Vault, or should I set one up?"
-- Has one → get URL
-- Needs one → install via Docker (Mode 1), send setup link
+## Agent Registration
 
-### Step 2: Register as agent
+After vault is running and user has set up password + passkey:
+
 ```bash
 # Generate keypair (once)
 if [ ! -f ~/.ssh/ssh-vault-agent.pub ]; then
@@ -86,29 +82,29 @@ curl -s ${VAULT_URL}/api/agent/register \
   -d "{\"fingerprint\":\"$FINGERPRINT\",\"publicKey\":\"$PUBKEY\",\"name\":\"OpenClaw Agent\"}"
 ```
 
-→ **Send `approvalUrl` to user via chat** → user opens, Passkey + password, approves
+→ **Send `approvalUrl` to user via chat** → user opens, Passkey + password → approves
 → ⏰ 5 minutes to approve
 
-### Step 3: Add hosts (when needed)
+## Adding Hosts
+
 ```bash
 curl -s ${VAULT_URL}/api/agent/request-host \
   -H 'Content-Type: application/json' \
   -d '{"name":"server-name","host":"1.2.3.4","port":22,"username":"root","credential":"ssh-password-or-key","authType":"password"}'
 ```
 
-→ **Send `approvalUrl` to user via chat** → user approves
-→ ⏰ 5 minutes to approve
+→ **Send `approvalUrl` to user via chat** → ⏰ 5 minutes
 
-### Step 4: Use SSH
+## Using SSH
+
 ```bash
 # Check status
 curl -s ${VAULT_URL}/api/vault/status
 
-# If locked → send unlock URL to user
+# If locked → request unlock, send URL to user
 curl -s -X POST ${VAULT_URL}/api/vault/unlock \
   -H 'Content-Type: application/json' \
   -d '{"agentFingerprint":"SHA256:..."}'
-# → send unlockUrl to user via chat
 
 # Execute command (requires Ed25519 signature)
 curl -s -X POST ${VAULT_URL}/api/vault/execute \
@@ -123,24 +119,12 @@ curl -s -X POST ${VAULT_URL}/api/vault/execute \
   }'
 ```
 
-## Signing Requests
-
-All API calls to execute commands require Ed25519 signature:
-
-```bash
-# Message format: action:host:command:timestamp
-# Sign with ~/.ssh/ssh-vault-agent private key
-# Timestamp must be within 30 seconds (replay protection)
-```
-
-See `scripts/sign-request.sh` for helper.
-
 ## Rules
 
-1. **Never ask for passwords** — vault handles all authentication
+1. **Never ask for passwords** — vault handles all auth
 2. **Send approval links via chat** — user approves on their device
-3. **No shell metacharacters** — `|`, `;`, `&&`, `>` are blocked by policy engine
-4. **Auto-lock** — vault locks after 15 min inactivity, send unlock link again
+3. **No shell metacharacters** — `|`, `;`, `&&`, `>` blocked by policy
+4. **Auto-lock** — 15 min inactivity, send unlock link again
 5. **Private key stays local** — never transmit `~/.ssh/ssh-vault-agent`
 
 ## Error Handling
@@ -152,4 +136,4 @@ See `scripts/sign-request.sh` for helper.
 | Command denied | Tell user, suggest simpler command |
 | Shell injection | Remove pipes/redirects |
 | Rate limited (429) | Wait and retry |
-| Approval expired | Re-send new approval link |
+| Approval expired | Send new approval link |
