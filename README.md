@@ -27,7 +27,6 @@ Think of it as a **SSH keychain where you're the only keyholder**, and the AI ju
 - 🖥️ **Agent-Initiated Host Addition**: Agents can request new hosts, pending user approval
 - 🔄 **Change Master Password**: Requires Passkey verification, re-encrypts entire vault
 - 💪 **Password Strength Check**: zxcvbn-based strength validation with real-time feedback
-- 📱 **Responsive Design**: Mobile-friendly UI, works on phones and tablets
 - ⏳ **5-Minute Approval Links**: All approval/challenge links expire after 5 minutes
 
 ## Architecture
