@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SSH Vault - Approve Host</title>
+  <style>
+    :root {
+      --bg: #0a0a0a; --card-bg: #141414; --border: #2a2a2a;
+      --text: #e5e5e5; --text-dim: #888; --primary: #3b82f6;
+      --primary-hover: #2563eb; --success: #22c55e; --error: #ef4444;
+      --warning: #f59e0b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg); color: var(--text); min-height: 100vh;
+      display: flex; align-items: center; justify-content: center; padding: 20px;
+    }
+    .card {
+      background: var(--card-bg); border: 1px solid var(--border);
+      border-radius: 16px; padding: 32px; max-width: 440px; width: 100%; text-align: center;
+    }
+    .logo { font-size: 48px; margin-bottom: 16px; }
+    h2 { margin-bottom: 8px; font-size: 22px; }
+    .subtitle { color: var(--text-dim); margin-bottom: 24px; font-size: 14px; }
+    .agent-info {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+      padding: 16px; margin-bottom: 24px; text-align: left;
+    }
+    .agent-info .label { color: var(--text-dim); font-size: 12px; margin-bottom: 4px; }
+    .agent-info .value { font-family: monospace; font-size: 13px; word-break: break-all; margin-bottom: 12px; }
+    .agent-info .value:last-child { margin-bottom: 0; }
+    .form-group { margin-bottom: 16px; text-align: left; }
+    .form-group label { display: block; margin-bottom: 6px; color: var(--text-dim); font-size: 14px; }
+    .form-group input {
+      width: 100%; padding: 10px 12px; background: var(--bg);
+      border: 1px solid var(--border); border-radius: 6px;
+      color: var(--text); font-size: 14px;
+    }
+    .form-group input:focus { outline: none; border-color: var(--primary); }
+    .btn {
+      padding: 12px 24px; border: none; border-radius: 8px; cursor: pointer;
+      font-size: 15px; font-weight: 600; transition: all 0.2s; width: 100%;
+    }
+    .btn-primary { background: var(--primary); color: white; }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-danger { background: var(--error); color: white; margin-top: 8px; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .actions { display: flex; flex-direction: column; gap: 8px; }
+    .status { margin-top: 16px; font-size: 14px; }
+    .status.success { color: var(--success); }
+    .status.error { color: var(--error); }
+    .expired { color: var(--warning); }
+    #authSection { display: none; }
+
+    @media (max-width: 480px) {
+      body { padding: 12px; }
+      .card { padding: 24px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">🖥️</div>
+    <h2>Host Request</h2>
+    <p class="subtitle" id="subtitle">An agent wants to add a host to your vault</p>
+
+    <div id="loading">Loading...</div>
+
+    <div id="agentDetails" style="display: none;">
+      <div class="agent-info">
+        <div class="label">Host Name</div>
+        <div class="value" id="hostName"></div>
+        <div class="label">Connection</div>
+        <div class="value" id="agentConnection"></div>
+      </div>
+
+      <!-- Step 1: Authenticate -->
+      <div id="authSection">
+        <div class="form-group">
+          <label>Master Password</label>
+          <input type="password" id="passwordInput" placeholder="Enter master password">
+        </div>
+        <button class="btn btn-primary" id="authBtn" onclick="authenticate()">
+          🔐 Authenticate & Approve
+        </button>
+        <button class="btn btn-danger" onclick="rejectAgent()">
+          ✖ Reject
+        </button>
+      </div>
+    </div>
+
+    <div id="statusMsg" class="status" style="display: none;"></div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const registrationId = params.get('id');
+
+    function base64ToBuffer(base64) {
+      const str = base64.replace(/-/g, '+').replace(/_/g, '/');
+      const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4));
+      const bin = atob(str + pad);
+      return Uint8Array.from(bin, c => c.charCodeAt(0)).buffer;
+    }
+    function bufferToBase64(buf) {
+      const bytes = new Uint8Array(buf);
+      let str = '';
+      bytes.forEach(b => str += String.fromCharCode(b));
+      return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    }
+
+    if (!registrationId) {
+      document.getElementById('loading').textContent = 'No registration ID provided';
+    } else {
+      loadRegistration();
+    }
+
+    async function loadRegistration() {
+      try {
+        const res = await fetch(`/api/agent/request-host/${registrationId}`);
+        if (!res.ok) {
+          const data = await res.json();
+          showStatus(data.error || 'Request not found', 'error');
+          document.getElementById('loading').style.display = 'none';
+          return;
+        }
+        const data = await res.json();
+        if (data.status !== 'pending') {
+          showStatus(`Request already ${data.status}`, data.status === 'approved' ? 'success' : 'error');
+          document.getElementById('loading').style.display = 'none';
+          return;
+        }
+        document.getElementById('hostName').textContent = data.name;
+        document.getElementById('agentConnection').textContent = `${data.username}@${data.host}:${data.port} (${data.authType})`;
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('agentDetails').style.display = 'block';
+        document.getElementById('authSection').style.display = 'block';
+      } catch (err) {
+        showStatus('Failed to load registration', 'error');
+        document.getElementById('loading').style.display = 'none';
+      }
+    }
+
+    async function authenticate() {
+      const password = document.getElementById('passwordInput').value;
+      if (!password) {
+        showStatus('Password required', 'error');
+        return;
+      }
+
+      const btn = document.getElementById('authBtn');
+      btn.disabled = true;
+      btn.textContent = '🔐 Authenticating...';
+
+      try {
+        // Step 1: Get WebAuthn options
+        const optionsRes = await fetch('/api/auth/options', { method: 'POST' });
+        if (!optionsRes.ok) throw new Error('Failed to get auth options');
+        const { options, challengeId } = await optionsRes.json();
+
+        // Step 2: Passkey authentication
+        const credential = await navigator.credentials.get({
+          publicKey: {
+            ...options,
+            challenge: base64ToBuffer(options.challenge),
+            allowCredentials: options.allowCredentials?.map(c => ({
+              ...c, id: base64ToBuffer(c.id)
+            }))
+          }
+        });
+
+        // Step 3: Verify with passkey + password
+        const authRes = await fetch('/api/manage/auth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            challengeId,
+            password,
+            response: {
+              id: credential.id,
+              rawId: bufferToBase64(credential.rawId),
+              type: credential.type,
+              response: {
+                clientDataJSON: bufferToBase64(credential.response.clientDataJSON),
+                authenticatorData: bufferToBase64(credential.response.authenticatorData),
+                signature: bufferToBase64(credential.response.signature),
+                userHandle: credential.response.userHandle ? bufferToBase64(credential.response.userHandle) : null
+              }
+            }
+          })
+        });
+        const authData = await authRes.json();
+
+        if (!authData.success) {
+          showStatus(authData.error || 'Authentication failed', 'error');
+          btn.disabled = false;
+          btn.textContent = '🔐 Authenticate & Approve';
+          return;
+        }
+
+        // Step 4: Approve the agent registration
+        const approveRes = await fetch(`/api/agent/request-host/${registrationId}/approve`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${authData.token}`,
+          },
+          body: JSON.stringify({ allowedHosts: ['*'] }),
+        });
+        const approveData = await approveRes.json();
+
+        if (approveData.success) {
+          showStatus('✅ Host added successfully!', 'success');
+          document.getElementById('authSection').style.display = 'none';
+        } else {
+          showStatus(approveData.error || 'Approval failed', 'error');
+          btn.disabled = false;
+          btn.textContent = '🔐 Authenticate & Approve';
+        }
+      } catch (err) {
+        if (err.name === 'NotAllowedError') {
+          showStatus('Passkey authentication cancelled', 'error');
+        } else {
+          showStatus(err.message || 'Authentication failed', 'error');
+        }
+        btn.disabled = false;
+        btn.textContent = '🔐 Authenticate & Approve';
+      }
+    }
+
+    async function rejectAgent() {
+      await fetch(`/api/agent/request-host/${registrationId}/reject`, { method: 'POST' });
+      showStatus('Host request rejected', 'error');
+      document.getElementById('authSection').style.display = 'none';
+    }
+
+    function showStatus(msg, type) {
+      const el = document.getElementById('statusMsg');
+      el.textContent = msg;
+      el.className = `status ${type}`;
+      el.style.display = 'block';
+    }
+  </script>
+</body>
+</html>

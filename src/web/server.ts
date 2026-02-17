@@ -885,6 +885,156 @@ export class WebServer {
       res.json({ success: true });
     });
 
+    // Agent-initiated host addition: agent requests, user approves via browser
+    const pendingHostRequests = new Map<string, {
+      name: string; host: string; port: number; username: string; credential: string; authType: string;
+      expiresAt: number; status: 'pending' | 'approved' | 'rejected'; result?: any;
+    }>();
+
+    this.app.post('/api/agent/request-host', (req: Request, res: Response) => {
+      try {
+        const { name, host, port, username, credential, authType } = req.body;
+        if (!name || !host || !username || !credential) {
+          res.status(400).json({ error: 'name, host, username, and credential required' });
+          return;
+        }
+        const challengeId = crypto.randomUUID();
+        const expiresAt = Date.now() + 10 * 60 * 1000; // 10 min
+
+        pendingHostRequests.set(challengeId, {
+          name, host, port: port || 22, username, credential, authType: authType || 'password',
+          expiresAt, status: 'pending',
+        });
+
+        // Clean expired
+        for (const [id, req] of pendingHostRequests) {
+          if (req.expiresAt < Date.now()) pendingHostRequests.delete(id);
+        }
+
+        res.json({
+          status: 'pending',
+          challengeId,
+          approvalUrl: `${this.config.web.externalUrl}/approve-host?id=${challengeId}`,
+          listenUrl: `${this.config.web.externalUrl}/api/agent/request-host/${challengeId}/listen`,
+          expiresAt,
+        });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' });
+      }
+    });
+
+    // SSE: agent polls for host approval
+    this.app.get('/api/agent/request-host/:id/listen', (req: Request, res: Response) => {
+      const hr = pendingHostRequests.get(req.params.id);
+      if (!hr || hr.expiresAt < Date.now()) {
+        res.status(404).json({ error: 'Request not found or expired' });
+        return;
+      }
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.flushHeaders();
+
+      const interval = setInterval(() => {
+        const current = pendingHostRequests.get(req.params.id);
+        if (!current || current.expiresAt < Date.now()) {
+          res.write('data: {"status":"expired"}\n\n');
+          clearInterval(interval);
+          res.end();
+          return;
+        }
+        if (current.status === 'approved') {
+          res.write(`data: ${JSON.stringify({ status: 'approved', host: current.result })}\n\n`);
+          clearInterval(interval);
+          pendingHostRequests.delete(req.params.id);
+          res.end();
+          return;
+        }
+        if (current.status === 'rejected') {
+          res.write('data: {"status":"rejected"}\n\n');
+          clearInterval(interval);
+          pendingHostRequests.delete(req.params.id);
+          res.end();
+          return;
+        }
+        res.write('data: {"status":"pending"}\n\n');
+      }, 2000);
+      req.on('close', () => clearInterval(interval));
+    });
+
+    // Get pending host request info (no sensitive data exposed)
+    this.app.get('/api/agent/request-host/:id', (req: Request, res: Response) => {
+      const hr = pendingHostRequests.get(req.params.id);
+      if (!hr || hr.expiresAt < Date.now()) {
+        res.status(404).json({ error: 'Request not found or expired' });
+        return;
+      }
+      res.json({
+        name: hr.name, host: hr.host, port: hr.port, username: hr.username,
+        authType: hr.authType, status: hr.status, expiresAt: hr.expiresAt,
+        // credential NOT exposed
+      });
+    });
+
+    // User approves host addition (requires manage auth)
+    this.app.post('/api/agent/request-host/:id/approve', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized - authenticate first' });
+        return;
+      }
+      const hr = pendingHostRequests.get(req.params.id);
+      if (!hr || hr.expiresAt < Date.now()) {
+        res.status(404).json({ error: 'Request not found or expired' });
+        return;
+      }
+      try {
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, true);
+        const vault = await storage.load(session.vek);
+
+        const hostId = crypto.randomUUID();
+        const newHost = {
+          id: hostId,
+          name: hr.name,
+          hostname: hr.host,
+          host: hr.host,
+          port: hr.port,
+          username: hr.username,
+          credential: hr.credential,
+          authType: hr.authType as 'key' | 'password',
+          tags: [] as string[],
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+
+        vault.hosts.push(newHost);
+        await storage.save(vault, session.vek);
+
+        hr.status = 'approved';
+        hr.result = { id: hostId, name: hr.name, host: hr.host };
+
+        console.error('[host-request] Host approved:', hr.name, hr.host);
+        res.json({ success: true, host: hr.result });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' });
+      }
+    });
+
+    // User rejects host request
+    this.app.post('/api/agent/request-host/:id/reject', (req: Request, res: Response) => {
+      const hr = pendingHostRequests.get(req.params.id);
+      if (!hr) { res.status(404).json({ error: 'Not found' }); return; }
+      hr.status = 'rejected';
+      res.json({ success: true });
+    });
+
+    // Serve host approval page
+    this.app.get('/approve-host', (_req: Request, res: Response) => {
+      res.sendFile(path.join(__dirname, '../../web/approve-host.html'));
+    });
+
     // Authenticate for management
     this.app.post('/api/manage/auth', async (req: Request, res: Response) => {
       if (!checkRateLimit(req.ip || 'unknown')) {
