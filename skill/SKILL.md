@@ -9,15 +9,8 @@ Secure SSH for AI agents. Credentials stay encrypted — you approve every actio
 
 ## Connection Modes
 
-### Mode 1: Managed Service (Recommended)
-Connect to an existing vault server. No installation needed.
-
-```
-VAULT_URL=https://ssh.example.com   # provided by user or org
-```
-
-### Mode 2: Self-Hosted Docker
-User wants their own vault. Install it for them:
+### Mode 1: Self-Hosted Docker
+User runs their own vault. Install it for them:
 
 ```bash
 # Check if already running
@@ -48,7 +41,7 @@ docker run -d --name ssh-vault --restart unless-stopped \
 
 After starting, send user the URL to set up Master Password + Passkey.
 
-### Mode 3: Local MCP (Claude Desktop / Cursor)
+### Mode 2: Local MCP (Claude Desktop / Cursor)
 For non-OpenClaw agents. User adds to their MCP config:
 
 ```json
@@ -76,7 +69,7 @@ All approval happens through chat. Never ask for passwords.
 ### Step 1: Determine vault URL
 Ask user: "Do you have an SSH Vault, or should I set one up?"
 - Has one → get URL
-- Needs one → install via Docker (Mode 2), send setup link
+- Needs one → install via Docker (Mode 1), send setup link
 
 ### Step 2: Register as agent
 ```bash
