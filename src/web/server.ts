@@ -712,6 +712,10 @@ export class WebServer {
 
     // Management API endpoints
     const manageSessions = new Map<string, { expiresAt: number; vek: Uint8Array }>();
+    const pendingAgentRegistrations = new Map<string, {
+      fingerprint: string; publicKey: string; name: string;
+      expiresAt: number; status: 'pending' | 'approved' | 'rejected'; result?: any;
+    }>();
 
     // Check if management session is valid
     this.app.get('/api/manage/check', (req: Request, res: Response) => {
@@ -725,6 +729,151 @@ export class WebServer {
         manageSessions.delete(token);
       }
       res.json({ authenticated: false });
+    });
+
+    // Agent-initiated registration: agent requests, user approves via browser
+    this.app.post('/api/agent/register', async (req: Request, res: Response) => {
+      try {
+        const { fingerprint, publicKey, name } = req.body;
+        if (!fingerprint || !publicKey) {
+          res.status(400).json({ error: 'fingerprint and publicKey required' });
+          return;
+        }
+        const challengeId = crypto.randomUUID();
+        const expiresAt = Date.now() + 5 * 60 * 1000; // 5 min
+
+        pendingAgentRegistrations.set(challengeId, {
+          fingerprint,
+          publicKey,
+          name: name || 'Unnamed Agent',
+          expiresAt,
+          status: 'pending',
+        });
+
+        // Clean up expired registrations
+        for (const [id, reg] of pendingAgentRegistrations) {
+          if (reg.expiresAt < Date.now()) pendingAgentRegistrations.delete(id);
+        }
+
+        const approvalUrl = `${this.config.web.externalUrl}/approve-agent?id=${challengeId}`;
+        const listenUrl = `${this.config.web.externalUrl}/api/agent/register/${challengeId}/listen`;
+
+        res.json({
+          status: 'pending',
+          challengeId,
+          approvalUrl,
+          listenUrl,
+          expiresAt,
+        });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' });
+      }
+    });
+
+    // SSE endpoint: agent polls for registration approval
+    this.app.get('/api/agent/register/:id/listen', (req: Request, res: Response) => {
+      const reg = pendingAgentRegistrations.get(req.params.id);
+      if (!reg || reg.expiresAt < Date.now()) {
+        res.status(404).json({ error: 'Registration not found or expired' });
+        return;
+      }
+
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.flushHeaders();
+
+      const interval = setInterval(() => {
+        const current = pendingAgentRegistrations.get(req.params.id);
+        if (!current || current.expiresAt < Date.now()) {
+          res.write('data: {"status":"expired"}\n\n');
+          clearInterval(interval);
+          res.end();
+          return;
+        }
+        if (current.status === 'approved') {
+          res.write(`data: ${JSON.stringify({ status: 'approved', agent: current.result })}\n\n`);
+          clearInterval(interval);
+          pendingAgentRegistrations.delete(req.params.id);
+          res.end();
+          return;
+        }
+        if (current.status === 'rejected') {
+          res.write('data: {"status":"rejected"}\n\n');
+          clearInterval(interval);
+          pendingAgentRegistrations.delete(req.params.id);
+          res.end();
+          return;
+        }
+        res.write('data: {"status":"pending"}\n\n');
+      }, 2000);
+
+      req.on('close', () => clearInterval(interval));
+    });
+
+    // User approves agent registration (requires manage auth)
+    this.app.post('/api/agent/register/:id/approve', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized - authenticate first' });
+        return;
+      }
+
+      const reg = pendingAgentRegistrations.get(req.params.id);
+      if (!reg || reg.expiresAt < Date.now()) {
+        res.status(404).json({ error: 'Registration not found or expired' });
+        return;
+      }
+
+      try {
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, true);
+        const vault = await storage.load(session.vek);
+
+        // Check if agent already exists
+        if (vault.agents.find(a => a.fingerprint === reg.fingerprint)) {
+          reg.status = 'approved';
+          reg.result = vault.agents.find(a => a.fingerprint === reg.fingerprint);
+          res.json({ success: true, message: 'Agent already registered' });
+          return;
+        }
+
+        const allowedHosts = req.body.allowedHosts || ['*'];
+        const newAgent = {
+          fingerprint: reg.fingerprint,
+          publicKey: reg.publicKey,
+          name: reg.name,
+          allowedHosts,
+          allowedCommands: req.body.allowedCommands || [],
+          deniedCommands: req.body.deniedCommands || [],
+          createdAt: Date.now(),
+          lastUsed: Date.now(),
+        };
+
+        vault.agents.push(newAgent);
+        await storage.save(vault, session.vek);
+
+        reg.status = 'approved';
+        reg.result = newAgent;
+
+        console.error('[agent-register] Agent approved:', reg.fingerprint, reg.name);
+        res.json({ success: true, agent: newAgent });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' });
+      }
+    });
+
+    // User rejects agent registration
+    this.app.post('/api/agent/register/:id/reject', (req: Request, res: Response) => {
+      const reg = pendingAgentRegistrations.get(req.params.id);
+      if (!reg) {
+        res.status(404).json({ error: 'Not found' });
+        return;
+      }
+      reg.status = 'rejected';
+      res.json({ success: true });
     });
 
     // Authenticate for management
@@ -1326,6 +1475,26 @@ export class WebServer {
 
     this.app.get('/approve', (_req: Request, res: Response) => {
       res.sendFile(path.join(__dirname, '../../web/auth.html'));
+    });
+
+    // Serve agent approval page
+    this.app.get('/approve-agent', (_req: Request, res: Response) => {
+      res.sendFile(path.join(__dirname, '../../web/approve-agent.html'));
+    });
+
+    // Get pending registration info (public, no auth needed)
+    this.app.get('/api/agent/register/:id', (req: Request, res: Response) => {
+      const reg = pendingAgentRegistrations.get(req.params.id);
+      if (!reg || reg.expiresAt < Date.now()) {
+        res.status(404).json({ error: 'Registration not found or expired' });
+        return;
+      }
+      res.json({
+        fingerprint: reg.fingerprint,
+        name: reg.name,
+        status: reg.status,
+        expiresAt: reg.expiresAt,
+      });
     });
 
     this.app.get('/setup', (_req: Request, res: Response) => {
