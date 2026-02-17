@@ -1,229 +1,149 @@
 # SSH Vault Skill
 
-This skill enables secure SSH access through a Passkey-protected vault with Master Password encryption.
+Secure SSH access through a Passkey-protected vault. Agent installs, connects, and operates — user approves via chat.
 
-## Overview
+## Quick Start (Agent Self-Install)
 
-SSH Vault MCP provides secure, human-approved SSH access. Credentials are encrypted with Argon2id + XSalsa20 (Master Password → VEK). Passkey authenticates the user. Agent signs all requests with Ed25519.
+If SSH Vault is not running, install it yourself:
+
+```bash
+# 1. Pull and start
+docker pull qsobad/ssh-vault-mcp:latest
+docker run -d --name ssh-vault --restart unless-stopped \
+  -p 3001:3001 \
+  -v ssh-vault-data:/app/data \
+  -v ./config.yml:/app/config.yml:ro \
+  -e SSH_VAULT_CONFIG=/app/config.yml \
+  qsobad/ssh-vault-mcp:latest
+
+# 2. Generate your agent keypair
+ssh-keygen -t ed25519 -f ~/.ssh/ssh-vault-agent -N "" -C "openclaw-agent"
+```
+
+Then follow the **Chat-Driven Setup** flow below.
+
+## Chat-Driven Setup Flow
+
+Everything happens through conversation with the user:
+
+### Step 1: Install (if needed)
+- Check: `docker ps --filter name=ssh-vault`
+- If not running: pull image, generate config, start container
+- Send user: "SSH Vault 已安装，请打开 {URL} 设置密码和Passkey"
+
+### Step 2: Wait for user to set up vault
+- User opens the URL in browser
+- Sets Master Password + registers Passkey
+- Tells you when done
+
+### Step 3: Register yourself as agent
+```bash
+FINGERPRINT=$(ssh-keygen -lf ~/.ssh/ssh-vault-agent.pub | awk '{print $2}')
+PUBKEY=$(awk '{print $2}' ~/.ssh/ssh-vault-agent.pub)
+
+curl -s http://localhost:3001/api/agent/register \
+  -H 'Content-Type: application/json' \
+  -d "{\"fingerprint\":\"$FINGERPRINT\",\"publicKey\":\"$PUBKEY\",\"name\":\"OpenClaw Agent\"}"
+```
+
+- **Send the `approvalUrl` to user via chat**
+- User opens link → Passkey + password → approves
+- ⏰ Link expires in 5 minutes
+
+### Step 4: Add hosts (when needed)
+```bash
+curl -s http://localhost:3001/api/agent/request-host \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"my-server","host":"1.2.3.4","port":22,"username":"root","credential":"...","authType":"password"}'
+```
+
+- **Send the `approvalUrl` to user via chat**
+- User approves
+- ⏰ Link expires in 5 minutes
+
+### Config Template
+```yaml
+webauthn:
+  rpId: "localhost"          # or your domain
+  rpName: "SSH Vault"
+  origin: "http://localhost:3001"  # or https://your-domain
+
+web:
+  port: 3001
+  external_url: "http://localhost:3001"
+```
+
+For HTTPS with a domain, set `rpId` to the domain and `origin` to `https://domain`.
 
 ## Security Model
 
 - **Encryption**: Argon2id(Master Password) → VEK → XSalsa20-Poly1305
-- **KDF**: Argon2id with t=3, m=64MB, p=1 (default parameters)
-- **Auth**: Passkey (WebAuthn) for human, Ed25519 signatures for agents
-- **Credentials**: Never in memory as plaintext — decrypted on-demand per command, wiped immediately after
-- **Auto-lock**: Vault locks after 15 min inactivity, VEK wiped from memory
-- **Policy**: Global command whitelist/blacklist + shell injection detection
-- **Rate limiting**: 5 attempts/IP/5min on all auth endpoints
-- **Approval expiry**: All challenge/approval links expire after 5 minutes
-- **Password strength**: zxcvbn validation on registration and password change
+- **KDF**: t=3, m=64MB, p=1
+- **Auth**: Passkey (WebAuthn) for user, Ed25519 signatures for agent
+- **Auto-lock**: 15 min inactivity → VEK wiped
+- **On-demand decryption**: Credentials decrypted per-command, wiped immediately
+- **Policy**: Command whitelist/blacklist + shell injection detection
+- **Rate limiting**: 5 attempts/IP/5min
+- **Approval expiry**: All links expire in 5 minutes
+- **Password strength**: zxcvbn validation
 
-## Agent Setup
+## Workflow (After Setup)
 
-### 1. Generate Ed25519 Keypair (locally)
-
-```javascript
-import nacl from 'tweetnacl';
-
-const keypair = nacl.sign.keyPair();
-const publicKey = Buffer.from(keypair.publicKey).toString('base64');
-const privateKey = Buffer.from(keypair.secretKey).toString('base64');
-```
-
-**⚠️ Private key stays with the agent. Never send it to the vault.**
-
-Store as JSON:
-```json
-{
-  "name": "my-agent",
-  "publicKey": "base64...",
-  "privateKey": "base64...",
-  "fingerprint": "SHA256:..."
-}
-```
-
-### 2. Register Agent (Recommended: Agent-Initiated)
-
+### 1. Check status
 ```bash
-curl -X POST https://ssh.29cp.cn/api/agent/register \
-  -H "Content-Type: application/json" \
+curl -s http://localhost:3001/health
+curl -s http://localhost:3001/api/vault/status
+```
+
+### 2. Unlock vault (if locked)
+```bash
+curl -s -X POST http://localhost:3001/api/vault/unlock \
+  -H 'Content-Type: application/json' \
+  -d '{"agentFingerprint":"SHA256:..."}'
+```
+→ Send `unlockUrl` to user via chat → user authenticates with Passkey
+
+### 3. Execute SSH command
+```bash
+curl -s -X POST http://localhost:3001/api/vault/execute \
+  -H 'Content-Type: application/json' \
   -d '{
-    "name": "my-agent",
-    "publicKey": "BASE64_PUBLIC_KEY"
+    "host": "my-server",
+    "command": "docker ps",
+    "fingerprint": "SHA256:...",
+    "publicKey": "...",
+    "signature": "...",
+    "timestamp": "...",
+    "nonce": "..."
   }'
 ```
 
-Response:
-```json
-{
-  "status": "pending_approval",
-  "challengeId": "xxx",
-  "approvalUrl": "https://ssh.29cp.cn/agent-register?id=xxx",
-  "listenUrl": "https://ssh.29cp.cn/api/agent/register/xxx/listen"
-}
-```
+All requests must be Ed25519 signed. Timestamp within 30 seconds.
 
-User visits `approvalUrl` → Passkey auth + Master Password → configures permissions → approves.
+### 4. If command needs approval
+Response includes `approvalUrl` → send to user via chat → user approves
 
-**⚠️ Approval link expires in 5 minutes!**
+## Key Rules for Agents
 
-### 2b. Request Host Addition (Agent-Initiated)
-
-```bash
-curl -X POST https://ssh.29cp.cn/api/agent/request-host \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "prod-01",
-    "hostname": "192.168.1.100",
-    "port": 22,
-    "username": "deploy",
-    "authType": "key"
-  }'
-```
-
-User visits approval URL → Passkey auth + Master Password → provides SSH credential → approves.
-
-### 2c. Request Access (Legacy)
-
-```bash
-curl -X POST https://ssh.29cp.cn/api/agent/request-access \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-agent",
-    "publicKey": "BASE64_PUBLIC_KEY",
-    "requestedHosts": ["s1"]
-  }'
-```
-
-User visits `approvalUrl` → Passkey auth → approves → agent gets session.
-
-### 3. Listen for Approval (SSE)
-
-Connect to `listenUrl` with `?agentFingerprint=SHA256:...` to receive events:
-
-```javascript
-const es = new EventSource(listenUrl + '?agentFingerprint=' + fingerprint);
-es.onmessage = (e) => {
-  const data = JSON.parse(e.data);
-  if (data.type === 'approved') {
-    // data.sessionId is your session token
-  }
-};
-```
-
-### 4. Sign Requests
-
-All API calls require Ed25519 signature:
-
-```javascript
-const timestamp = Date.now().toString();
-const message = `execute:${host}:${command}:${timestamp}`;
-const signature = Buffer.from(
-  nacl.sign.detached(new TextEncoder().encode(message), privateKeyBytes)
-).toString('base64');
-```
-
-**Timestamp must be within 30 seconds** (replay protection).
-
-## Workflow
-
-### 1. Check Vault Status
-
-```json
-{ "tool": "vault_status" }
-```
-
-- `locked: true` → need unlock
-- `locked: false` → ready
-
-### 2. Unlock Vault (if locked)
-
-```json
-{ "tool": "request_unlock" }
-```
-
-Returns URL for user to authenticate with Passkey + Master Password. Two completion paths:
-
-**Option A: SSE auto-notification (preferred)**
-- Listen on `listenUrl` for `approved` event
-- Continue automatically
-
-**Option B: Manual unlock code**
-- User copies code from web page
-- Submit: `{ "tool": "submit_unlock", "unlock_code": "UNLOCK-X7K9P" }`
-
-### 3. List Available Hosts
-
-```json
-{ "tool": "list_hosts" }
-```
-
-### 4. Execute Commands
-
-```json
-{
-  "tool": "execute_command",
-  "host": "s1",
-  "command": "docker ps"
-}
-```
-
-Requires:
-- Valid session (from approved access request)
-- Agent signature + timestamp
-- Command passes policy engine (whitelist/blacklist + no shell injection)
-- Timeout: 1-300 seconds (default 30)
-
-**If command needs approval:**
-```json
-{
-  "needsApproval": true,
-  "approvalUrl": "https://ssh.29cp.cn/approve?challenge=xyz"
-}
-```
-
-### 5. End Session
-
-```json
-{ "tool": "revoke_session" }
-```
-
-## Command Policy
-
-**Blocked patterns:**
-- `rm -rf /`, `mkfs`, `dd if=`, `:(){ :|:& };:`
-- Shell metacharacters: `|`, `;`, `&&`, `||`, `>`, `<`, `` ` ``, `$()`
-
-**Allowed commands** are configured per-agent during approval.
+1. **Never ask for passwords** — you don't need them, the vault handles auth
+2. **Send all approval links via chat** — the user approves on their device
+3. **No shell metacharacters** — `|`, `;`, `&&` are blocked. Use simple commands
+4. **Watch for auto-lock** — vault locks after 15 min, need user to unlock again
+5. **Private key stays local** — never transmit `~/.ssh/ssh-vault-agent`
+6. **Credential in request-host** — this is the SSH password or key for the target server, encrypted in vault
 
 ## Error Handling
 
 | Error | Action |
 |-------|--------|
-| "Vault is locked" | Call `request_unlock` |
+| "Vault is locked" | Send unlock URL to user via chat |
 | "Session expired" | Request access again |
-| "Command denied by policy" | Inform user, suggest alternative |
-| "Shell injection detected" | Remove pipes/redirects, use simple commands |
-| "Host not found" | Call `list_hosts` |
+| "Command denied" | Tell user, suggest alternative |
+| "Shell injection" | Simplify command, remove pipes |
 | "Rate limited" (429) | Wait and retry |
-| "Invalid signature" | Check timestamp is within 30s, verify keypair |
-
-## Important Notes
-
-1. **Auto-lock**: Vault locks after 15 min inactivity. You'll need user to unlock again.
-2. **On-demand decryption**: SSH credentials are never held in memory. Decrypted per-command, wiped immediately.
-3. **No shell metacharacters**: Use simple commands. `cat file | grep x` is blocked — use `grep x file` instead.
-4. **Agent private key**: Store securely on agent side only. Never transmit.
-5. **Nonce window**: Timestamps older than 30 seconds are rejected.
-
-## Server URL
-
-```
-https://ssh.29cp.cn
-```
 
 ## File Locations
 
-- Agent keypair: Store in agent's local environment (e.g., `data/my-agent.json`)
-- Vault data: `data/vault.enc` (encrypted, 0600 permissions)
-- Config: `src/config.ts`
+- Agent keypair: `~/.ssh/ssh-vault-agent` / `~/.ssh/ssh-vault-agent.pub`
+- Vault data: Docker volume `ssh-vault-data`
+- Config: Mounted as `/app/config.yml`
