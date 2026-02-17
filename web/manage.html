@@ -188,6 +188,67 @@
     .auth-card .logo { font-size: 48px; margin-bottom: 16px; }
     .auth-card h2 { margin-bottom: 8px; }
     .auth-card p { color: var(--text-dim); margin-bottom: 24px; }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      body { padding: 12px; }
+
+      header {
+        flex-direction: column;
+        gap: 12px;
+        align-items: flex-start;
+      }
+      header .btn { width: 100%; text-align: center; }
+
+      h1 { font-size: 20px; }
+
+      .tabs {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        flex-wrap: nowrap;
+      }
+      .tabs::-webkit-scrollbar { display: none; }
+
+      .tab {
+        padding: 8px 14px;
+        font-size: 13px;
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+
+      .card { padding: 14px; }
+      .card-header {
+        flex-direction: column;
+        gap: 10px;
+        align-items: flex-start;
+      }
+      .card-header .btn { width: 100%; text-align: center; }
+
+      /* Make tables scroll horizontally */
+      table { display: block; overflow-x: auto; white-space: nowrap; }
+      th, td { padding: 8px 10px; font-size: 13px; }
+
+      .modal-content {
+        margin: 12px;
+        max-width: calc(100vw - 24px);
+        max-height: 90vh;
+        overflow-y: auto;
+      }
+
+      .auth-card {
+        margin: 12px;
+        padding: 24px;
+        max-width: calc(100vw - 24px);
+      }
+    }
+
+    @media (max-width: 480px) {
+      .tab { padding: 6px 10px; font-size: 12px; }
+      h1 { font-size: 18px; }
+      h2 { font-size: 16px; }
+      .btn { font-size: 13px; }
+    }
   </style>
 </head>
 <body>
