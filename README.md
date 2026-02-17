@@ -2,6 +2,17 @@
 
 A secure SSH credential vault with [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) interface. Human approves via Passkey, AI agent executes SSH commands.
 
+## Why?
+
+AI agents need SSH access to manage servers — but giving them raw credentials is dangerous. SSH Vault solves this:
+
+- **Agent never sees passwords or keys** — the vault authenticates on its behalf
+- **You approve every action** — via Passkey on your phone, in real-time
+- **Policy engine limits what agents can do** — whitelist/blacklist commands, block dangerous patterns
+- **Works with any MCP-compatible AI** — Claude, GPT, or your own agent
+
+Think of it as a **SSH keychain where you're the only keyholder**, and the AI just asks you to unlock the door.
+
 ## Features
 
 - 🔐 **Passkey + Master Password**: Passkey for identity, Master Password for encryption
