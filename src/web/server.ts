@@ -1401,10 +1401,11 @@ export class WebServer {
 
         // Derive new VEK with new password and fresh salt
         const newSalt = generateSalt();
-        const newVek = deriveKeyFromPassword(newPassword, newSalt, authMeta.kdfParams);
+        const { DEFAULT_KDF_PARAMS } = await import('../vault/encryption.js');
+        const newVek = deriveKeyFromPassword(newPassword, newSalt, DEFAULT_KDF_PARAMS);
 
-        // Re-encrypt vault with new VEK
-        await storage.saveWithPasswordSalt(vault, newVek, toBase64(newSalt), authMeta.kdfParams);
+        // Re-encrypt vault with new VEK and upgraded KDF params
+        await storage.saveWithPasswordSalt(vault, newVek, toBase64(newSalt), DEFAULT_KDF_PARAMS);
 
         // Update session VEK to new one
         session.vek = newVek;
