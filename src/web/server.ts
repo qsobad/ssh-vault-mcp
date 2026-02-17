@@ -899,7 +899,7 @@ export class WebServer {
           return;
         }
         const challengeId = crypto.randomUUID();
-        const expiresAt = Date.now() + 10 * 60 * 1000; // 10 min
+        const expiresAt = Date.now() + 5 * 60 * 1000; // 5 min
 
         pendingHostRequests.set(challengeId, {
           name, host, port: port || 22, username, credential, authType: authType || 'password',
