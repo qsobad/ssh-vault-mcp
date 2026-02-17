@@ -15,19 +15,12 @@ Think of it as a **SSH keychain where you're the only keyholder**, and the AI ju
 
 ## Features
 
-- 🔐 **Passkey + Master Password**: Passkey for identity, Master Password for encryption
-- 🔒 **Strong Encryption**: Argon2id key derivation (t=3, m=64MB, p=1) + XSalsa20-Poly1305 (tweetnacl)
-- 🤖 **MCP Interface**: AI agents access SSH through standardized tools
-- ✍️ **Ed25519 Agent Signatures**: Every request cryptographically signed
-- 📋 **Policy Engine**: Command whitelist/blacklist + shell injection detection
-- ⏱️ **Auto-lock**: Vault locks after 15 min inactivity, VEK wiped from memory
-- 🔑 **On-demand Decryption**: Credentials decrypted per-command, never held in memory
-- 🚫 **No Proxy**: Vault handles auth — SSH runs server-side, not through agent
-- 🤖 **Agent-Initiated Registration**: Agents can self-register, pending user Passkey + password approval
-- 🖥️ **Agent-Initiated Host Addition**: Agents can request new hosts, pending user approval
-- 🔄 **Change Master Password**: Requires Passkey verification, re-encrypts entire vault
-- 💪 **Password Strength Check**: zxcvbn-based strength validation with real-time feedback
-- ⏳ **5-Minute Approval Links**: All approval/challenge links expire after 5 minutes
+- 🔐 **Passkey + Master Password** — dual-factor vault access
+- 🔒 **End-to-end encryption** — Argon2id + XSalsa20-Poly1305, credentials never in memory
+- 🤖 **MCP compatible** — works with Claude Desktop, Cursor, OpenClaw, and any MCP client
+- 📋 **Policy engine** — command whitelist/blacklist + shell injection detection
+- 🤝 **Chat-driven approval** — agents self-register and add hosts, you approve via Passkey
+- ⏱️ **Auto-lock** — vault locks after 15 min, keys wiped from memory
 
 ## Architecture
 
