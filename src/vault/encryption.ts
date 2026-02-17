@@ -19,15 +19,14 @@ export interface KdfParams {
 }
 
 /**
- * Strong KDF parameters for new vaults.
- * t=10 iterations, m=256 MB, p=4 lanes.
- * At ~10-50 hashes/sec on modern hardware, a 12-char mixed password
- * (~72 bits entropy) is computationally infeasible to brute-force.
+ * Default KDF parameters for vaults.
+ * t=3 iterations, m=64 MB, p=1 lane.
+ * Good security/performance balance for interactive use (~2-5s on typical servers).
  */
 export const DEFAULT_KDF_PARAMS: KdfParams = {
-  t: 10,
-  m: 262144,  // 256 MB (in KiB)
-  p: 4,
+  t: 3,
+  m: 65536,   // 64 MB (in KiB)
+  p: 1,
   dkLen: 32,
 };
 
