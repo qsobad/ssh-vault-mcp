@@ -48,14 +48,50 @@ export async function loadConfig(configPath?: string): Promise<Config> {
     try {
       const content = await fs.readFile(p, 'utf-8');
       const parsed = parseYaml(content);
-      return mergeConfig(DEFAULT_CONFIG, parsed);
+      return applyEnvOverrides(mergeConfig(DEFAULT_CONFIG, parsed));
     } catch {
       // Try next path
     }
   }
 
-  // Return default config if no file found
-  return DEFAULT_CONFIG;
+  // No config file found — try environment variables
+  return applyEnvOverrides(DEFAULT_CONFIG);
+}
+
+/**
+ * Apply environment variable overrides.
+ * Supports: SSH_VAULT_DOMAIN, SSH_VAULT_PORT, SSH_VAULT_ORIGIN, SSH_VAULT_DATA_PATH, PORT
+ */
+function applyEnvOverrides(config: Config): Config {
+  const domain = process.env.SSH_VAULT_DOMAIN;
+  const port = process.env.SSH_VAULT_PORT || process.env.PORT;
+  const origin = process.env.SSH_VAULT_ORIGIN;
+  const dataPath = process.env.SSH_VAULT_DATA_PATH;
+
+  if (domain) {
+    const isLocal = domain === 'localhost' || domain.startsWith('127.');
+    const proto = isLocal ? 'http' : 'https';
+    const defaultOrigin = port && isLocal ? `${proto}://${domain}:${port}` : `${proto}://${domain}`;
+
+    config.webauthn.rpId = domain;
+    config.webauthn.origin = origin || defaultOrigin;
+    config.web.externalUrl = origin || defaultOrigin;
+  }
+
+  if (port) {
+    config.web.port = parseInt(port, 10);
+  }
+
+  if (origin) {
+    config.webauthn.origin = origin;
+    config.web.externalUrl = origin;
+  }
+
+  if (dataPath) {
+    config.vault.path = dataPath;
+  }
+
+  return config;
 }
 
 function mergeConfig(defaults: Config, overrides: Partial<Config>): Config {

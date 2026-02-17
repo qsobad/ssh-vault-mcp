@@ -46,7 +46,17 @@ Think of it as a **SSH keychain where you're the only keyholder**, and the AI ju
 
 ## Quick Start
 
-### One-line install
+### Deploy to Railway (one click)
+
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/ssh-vault?referralCode=ssh-vault)
+
+Set these environment variables in Railway:
+- `SSH_VAULT_DOMAIN` — your Railway domain (e.g. `ssh-vault-production.up.railway.app`)
+- `PORT` — Railway sets this automatically
+
+That's it. Open the URL → set Master Password → register Passkey.
+
+### One-line install (VPS / local)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/qsobad/ssh-vault-mcp/main/install.sh | bash
