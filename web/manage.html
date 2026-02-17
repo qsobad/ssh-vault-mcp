@@ -338,6 +338,29 @@
           No passkeys registered.
         </div>
       </div>
+
+      <!-- Change Master Password -->
+      <div class="card" style="margin-top: 16px;">
+        <div class="card-header">
+          <h2>🔑 Change Master Password</h2>
+        </div>
+        <div class="form-group">
+          <label style="color: var(--text-dim);">Current Password</label>
+          <input type="password" id="currentPasswordInput" placeholder="Enter current password" style="width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px;">
+        </div>
+        <div class="form-group" style="margin-top: 12px;">
+          <label style="color: var(--text-dim);">New Password</label>
+          <input type="password" id="newPasswordInput" placeholder="Min 8 characters" style="width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px;">
+        </div>
+        <div class="form-group" style="margin-top: 12px;">
+          <label style="color: var(--text-dim);">Confirm New Password</label>
+          <input type="password" id="confirmPasswordInput" placeholder="Re-enter new password" style="width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px;">
+        </div>
+        <button class="btn btn-primary" onclick="changePassword()" style="width: 100%; margin-top: 16px; padding: 14px;">
+          🔑 Change Password
+        </button>
+        <div id="changePasswordStatus" style="text-align: center; margin-top: 12px; font-size: 13px; display: none;"></div>
+      </div>
     </div>
 
     <!-- Policy Tab -->
@@ -945,6 +968,59 @@
         headers: { 'Authorization': `Bearer ${sessionToken}` }
       });
       loadVaultData();
+    }
+
+    async function changePassword() {
+      const currentPassword = document.getElementById('currentPasswordInput').value;
+      const newPassword = document.getElementById('newPasswordInput').value;
+      const confirmPassword = document.getElementById('confirmPasswordInput').value;
+      const statusEl = document.getElementById('changePasswordStatus');
+
+      if (!currentPassword || !newPassword) {
+        statusEl.style.display = 'block';
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = 'Please fill in all fields';
+        return;
+      }
+      if (newPassword.length < 8) {
+        statusEl.style.display = 'block';
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = 'New password must be at least 8 characters';
+        return;
+      }
+      if (newPassword !== confirmPassword) {
+        statusEl.style.display = 'block';
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = 'New passwords do not match';
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/manage/change-password', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${manageToken}`,
+          },
+          body: JSON.stringify({ currentPassword, newPassword }),
+        });
+        const data = await res.json();
+        statusEl.style.display = 'block';
+        if (data.success) {
+          statusEl.style.color = 'var(--success)';
+          statusEl.textContent = '✅ Password changed successfully';
+          document.getElementById('currentPasswordInput').value = '';
+          document.getElementById('newPasswordInput').value = '';
+          document.getElementById('confirmPasswordInput').value = '';
+        } else {
+          statusEl.style.color = 'var(--error)';
+          statusEl.textContent = data.error || 'Failed to change password';
+        }
+      } catch (err) {
+        statusEl.style.display = 'block';
+        statusEl.style.color = 'var(--error)';
+        statusEl.textContent = 'Network error';
+      }
     }
 
     async function lockVault() {

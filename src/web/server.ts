@@ -1161,6 +1161,67 @@ export class WebServer {
       }
     });
 
+    // Change master password
+    this.app.post('/api/manage/change-password', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      try {
+        const { currentPassword, newPassword } = req.body;
+        if (!currentPassword || !newPassword) {
+          res.status(400).json({ error: 'Both currentPassword and newPassword required' });
+          return;
+        }
+        if (newPassword.length < 8) {
+          res.status(400).json({ error: 'New password must be at least 8 characters' });
+          return;
+        }
+
+        // Verify current password
+        const authMeta = await this.vaultManager.getAuthMetadata();
+        if (!authMeta) {
+          res.status(404).json({ error: 'No vault found' });
+          return;
+        }
+        const { deriveKeyFromPassword, generateSalt, toBase64, fromBase64, secureWipe } = await import('../vault/encryption.js');
+        const oldSalt = fromBase64(authMeta.passwordSalt);
+        const oldVek = deriveKeyFromPassword(currentPassword, oldSalt, authMeta.kdfParams);
+
+        // Verify old password by trying to decrypt
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, true);
+        let vault;
+        try {
+          vault = await storage.load(oldVek);
+        } catch {
+          res.status(401).json({ error: 'Current password is incorrect' });
+          return;
+        }
+
+        // Derive new VEK with new password and fresh salt
+        const newSalt = generateSalt();
+        const newVek = deriveKeyFromPassword(newPassword, newSalt, authMeta.kdfParams);
+
+        // Re-encrypt vault with new VEK
+        await storage.saveWithPasswordSalt(vault, newVek, toBase64(newSalt), authMeta.kdfParams);
+
+        // Update session VEK to new one
+        session.vek = newVek;
+        session.expiresAt = Date.now() + 30 * 60 * 1000;
+
+        // Wipe old VEK
+        secureWipe(oldVek);
+
+        console.error('[manage] Master password changed successfully');
+        res.json({ success: true });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to change password' });
+      }
+    });
+
     // Reset passkey using master password (recovery flow)
     this.app.post('/api/manage/reset-passkey', async (req: Request, res: Response) => {
       if (!checkRateLimit(req.ip || 'unknown')) {
