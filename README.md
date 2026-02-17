@@ -60,19 +60,7 @@ The script pulls the Docker image, asks for your domain, generates config, and s
 
 ### 2. Local MCP (Claude Desktop / Cursor)
 
-For AI coding tools with MCP support. Create `config.yml`:
-
-```yaml
-webauthn:
-  rpId: "localhost"
-  rpName: "SSH Vault"
-  origin: "http://localhost:3001"
-web:
-  port: 3001
-  external_url: "http://localhost:3001"
-```
-
-Add to your MCP client config:
+For AI coding tools with MCP support. Add to your MCP client config:
 
 ```json
 {
@@ -83,8 +71,7 @@ Add to your MCP client config:
         "run", "-i", "--rm",
         "-p", "3001:3001",
         "-v", "ssh-vault-data:/app/data",
-        "-v", "/path/to/config.yml:/app/config.yml:ro",
-        "-e", "SSH_VAULT_CONFIG=/app/config.yml",
+        "-e", "SSH_VAULT_DOMAIN=localhost",
         "qsobad/ssh-vault-mcp:latest"
       ]
     }
@@ -92,7 +79,7 @@ Add to your MCP client config:
 }
 ```
 
-Restart your MCP client. Visit `http://localhost:3001` to set up.
+No config file needed — the `SSH_VAULT_DOMAIN` env var handles it. Restart your MCP client, then visit `http://localhost:3001` to set up.
 
 ### 3. OpenClaw Skill (chat-driven)
 
