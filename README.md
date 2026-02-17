@@ -46,6 +46,21 @@ Think of it as a **SSH keychain where you're the only keyholder**, and the AI ju
 
 ## Quick Start
 
+### One-line install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/qsobad/ssh-vault-mcp/main/install.sh | bash
+```
+
+That's it. The script will:
+- Pull the Docker image
+- Ask for your domain (or use localhost)
+- Generate config
+- Start the container
+- Tell you where to go next
+
+### Manual install
+
 ### 1. Pull the image
 
 ```bash
