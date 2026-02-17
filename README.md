@@ -44,24 +44,75 @@ Think of it as a **SSH keychain where you're the only keyholder**, and the AI ju
 └──────────────┘                             └──────────────┘
 ```
 
-## Quick Start
+## Installation
 
-### One-line install
+Three ways to get started:
+
+### 1. Self-Hosted Docker (one command)
+
+For users with a VPS or server:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/qsobad/ssh-vault-mcp/main/install.sh | bash
 ```
 
-That's it. The script will:
-- Pull the Docker image
-- Ask for your domain (or use localhost)
-- Generate config
-- Start the container
-- Tell you where to go next
+The script pulls the Docker image, asks for your domain, generates config, and starts the vault. Then open the URL → set Master Password → register Passkey → done.
 
-### Manual install
+### 2. Local MCP (Claude Desktop / Cursor)
 
-### 1. Pull the image
+For AI coding tools with MCP support. Create `config.yml`:
+
+```yaml
+webauthn:
+  rpId: "localhost"
+  rpName: "SSH Vault"
+  origin: "http://localhost:3001"
+web:
+  port: 3001
+  external_url: "http://localhost:3001"
+```
+
+Add to your MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "ssh-vault": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-p", "3001:3001",
+        "-v", "ssh-vault-data:/app/data",
+        "-v", "/path/to/config.yml:/app/config.yml:ro",
+        "-e", "SSH_VAULT_CONFIG=/app/config.yml",
+        "qsobad/ssh-vault-mcp:latest"
+      ]
+    }
+  }
+}
+```
+
+Restart your MCP client. Visit `http://localhost:3001` to set up.
+
+### 3. OpenClaw Skill (chat-driven)
+
+For [OpenClaw](https://openclaw.ai) agents. Install the skill, then everything happens through chat:
+
+- Agent self-registers → sends approval link to chat
+- Adding hosts → sends approval link to chat
+- SSH commands → sends unlock link when needed
+
+User only needs to tap links and authenticate with Passkey.
+
+---
+
+> **All methods require the same two steps from the user:**
+> 1. Set Master Password + register Passkey
+> 2. Approve agent requests on your device
+
+### Manual Docker install
+
+#### Pull the image
 
 ```bash
 docker pull qsobad/ssh-vault-mcp:latest
