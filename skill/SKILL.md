@@ -1,149 +1,162 @@
-# SSH Vault Skill
+---
+name: ssh-vault
+description: Secure SSH access through a Passkey-protected vault. Agent connects to a vault server (self-hosted or managed), registers via chat approval, and executes SSH commands with human oversight. Use when you need SSH access to servers, want to set up secure credential management, or need to run remote commands.
+---
 
-Secure SSH access through a Passkey-protected vault. Agent installs, connects, and operates — user approves via chat.
+# SSH Vault
 
-## Quick Start (Agent Self-Install)
+Secure SSH for AI agents. Credentials stay encrypted — you approve every action via Passkey on your phone.
 
-If SSH Vault is not running, install it yourself:
+## Connection Modes
+
+### Mode 1: Managed Service (Recommended)
+Connect to an existing vault server. No installation needed.
+
+```
+VAULT_URL=https://ssh.example.com   # provided by user or org
+```
+
+### Mode 2: Self-Hosted Docker
+User wants their own vault. Install it for them:
 
 ```bash
-# 1. Pull and start
+# Check if already running
+docker ps --filter name=ssh-vault --format '{{.Names}}'
+
+# If not, install:
 docker pull qsobad/ssh-vault-mcp:latest
+
+# Generate config (ask user for domain, or use localhost)
+cat > /tmp/ssh-vault-config.yml << 'EOF'
+webauthn:
+  rpId: "DOMAIN"
+  rpName: "SSH Vault"
+  origin: "https://DOMAIN"
+web:
+  port: 3001
+  external_url: "https://DOMAIN"
+EOF
+
+# Start
 docker run -d --name ssh-vault --restart unless-stopped \
   -p 3001:3001 \
   -v ssh-vault-data:/app/data \
-  -v ./config.yml:/app/config.yml:ro \
+  -v /tmp/ssh-vault-config.yml:/app/config.yml:ro \
   -e SSH_VAULT_CONFIG=/app/config.yml \
   qsobad/ssh-vault-mcp:latest
-
-# 2. Generate your agent keypair
-ssh-keygen -t ed25519 -f ~/.ssh/ssh-vault-agent -N "" -C "openclaw-agent"
 ```
 
-Then follow the **Chat-Driven Setup** flow below.
+After starting, send user the URL to set up Master Password + Passkey.
 
-## Chat-Driven Setup Flow
+### Mode 3: Local MCP (Claude Desktop / Cursor)
+For non-OpenClaw agents. User adds to their MCP config:
 
-Everything happens through conversation with the user:
+```json
+{
+  "mcpServers": {
+    "ssh-vault": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-p", "3001:3001",
+        "-v", "ssh-vault-data:/app/data",
+        "-v", "/path/to/config.yml:/app/config.yml:ro",
+        "-e", "SSH_VAULT_CONFIG=/app/config.yml",
+        "qsobad/ssh-vault-mcp:latest"
+      ]
+    }
+  }
+}
+```
 
-### Step 1: Install (if needed)
-- Check: `docker ps --filter name=ssh-vault`
-- If not running: pull image, generate config, start container
-- Send user: "SSH Vault 已安装，请打开 {URL} 设置密码和Passkey"
+## Chat-Driven Setup
 
-### Step 2: Wait for user to set up vault
-- User opens the URL in browser
-- Sets Master Password + registers Passkey
-- Tells you when done
+All approval happens through chat. Never ask for passwords.
 
-### Step 3: Register yourself as agent
+### Step 1: Determine vault URL
+Ask user: "Do you have an SSH Vault, or should I set one up?"
+- Has one → get URL
+- Needs one → install via Docker (Mode 2), send setup link
+
+### Step 2: Register as agent
 ```bash
+# Generate keypair (once)
+if [ ! -f ~/.ssh/ssh-vault-agent.pub ]; then
+  ssh-keygen -t ed25519 -f ~/.ssh/ssh-vault-agent -N "" -C "openclaw-agent"
+fi
+
 FINGERPRINT=$(ssh-keygen -lf ~/.ssh/ssh-vault-agent.pub | awk '{print $2}')
 PUBKEY=$(awk '{print $2}' ~/.ssh/ssh-vault-agent.pub)
 
-curl -s http://localhost:3001/api/agent/register \
+curl -s ${VAULT_URL}/api/agent/register \
   -H 'Content-Type: application/json' \
   -d "{\"fingerprint\":\"$FINGERPRINT\",\"publicKey\":\"$PUBKEY\",\"name\":\"OpenClaw Agent\"}"
 ```
 
-- **Send the `approvalUrl` to user via chat**
-- User opens link → Passkey + password → approves
-- ⏰ Link expires in 5 minutes
+→ **Send `approvalUrl` to user via chat** → user opens, Passkey + password, approves
+→ ⏰ 5 minutes to approve
 
-### Step 4: Add hosts (when needed)
+### Step 3: Add hosts (when needed)
 ```bash
-curl -s http://localhost:3001/api/agent/request-host \
+curl -s ${VAULT_URL}/api/agent/request-host \
   -H 'Content-Type: application/json' \
-  -d '{"name":"my-server","host":"1.2.3.4","port":22,"username":"root","credential":"...","authType":"password"}'
+  -d '{"name":"server-name","host":"1.2.3.4","port":22,"username":"root","credential":"ssh-password-or-key","authType":"password"}'
 ```
 
-- **Send the `approvalUrl` to user via chat**
-- User approves
-- ⏰ Link expires in 5 minutes
+→ **Send `approvalUrl` to user via chat** → user approves
+→ ⏰ 5 minutes to approve
 
-### Config Template
-```yaml
-webauthn:
-  rpId: "localhost"          # or your domain
-  rpName: "SSH Vault"
-  origin: "http://localhost:3001"  # or https://your-domain
-
-web:
-  port: 3001
-  external_url: "http://localhost:3001"
-```
-
-For HTTPS with a domain, set `rpId` to the domain and `origin` to `https://domain`.
-
-## Security Model
-
-- **Encryption**: Argon2id(Master Password) → VEK → XSalsa20-Poly1305
-- **KDF**: t=3, m=64MB, p=1
-- **Auth**: Passkey (WebAuthn) for user, Ed25519 signatures for agent
-- **Auto-lock**: 15 min inactivity → VEK wiped
-- **On-demand decryption**: Credentials decrypted per-command, wiped immediately
-- **Policy**: Command whitelist/blacklist + shell injection detection
-- **Rate limiting**: 5 attempts/IP/5min
-- **Approval expiry**: All links expire in 5 minutes
-- **Password strength**: zxcvbn validation
-
-## Workflow (After Setup)
-
-### 1. Check status
+### Step 4: Use SSH
 ```bash
-curl -s http://localhost:3001/health
-curl -s http://localhost:3001/api/vault/status
-```
+# Check status
+curl -s ${VAULT_URL}/api/vault/status
 
-### 2. Unlock vault (if locked)
-```bash
-curl -s -X POST http://localhost:3001/api/vault/unlock \
+# If locked → send unlock URL to user
+curl -s -X POST ${VAULT_URL}/api/vault/unlock \
   -H 'Content-Type: application/json' \
   -d '{"agentFingerprint":"SHA256:..."}'
-```
-→ Send `unlockUrl` to user via chat → user authenticates with Passkey
+# → send unlockUrl to user via chat
 
-### 3. Execute SSH command
-```bash
-curl -s -X POST http://localhost:3001/api/vault/execute \
+# Execute command (requires Ed25519 signature)
+curl -s -X POST ${VAULT_URL}/api/vault/execute \
   -H 'Content-Type: application/json' \
   -d '{
-    "host": "my-server",
+    "host": "server-name",
     "command": "docker ps",
     "fingerprint": "SHA256:...",
-    "publicKey": "...",
     "signature": "...",
     "timestamp": "...",
     "nonce": "..."
   }'
 ```
 
-All requests must be Ed25519 signed. Timestamp within 30 seconds.
+## Signing Requests
 
-### 4. If command needs approval
-Response includes `approvalUrl` → send to user via chat → user approves
+All API calls to execute commands require Ed25519 signature:
 
-## Key Rules for Agents
+```bash
+# Message format: action:host:command:timestamp
+# Sign with ~/.ssh/ssh-vault-agent private key
+# Timestamp must be within 30 seconds (replay protection)
+```
 
-1. **Never ask for passwords** — you don't need them, the vault handles auth
-2. **Send all approval links via chat** — the user approves on their device
-3. **No shell metacharacters** — `|`, `;`, `&&` are blocked. Use simple commands
-4. **Watch for auto-lock** — vault locks after 15 min, need user to unlock again
+See `scripts/sign-request.sh` for helper.
+
+## Rules
+
+1. **Never ask for passwords** — vault handles all authentication
+2. **Send approval links via chat** — user approves on their device
+3. **No shell metacharacters** — `|`, `;`, `&&`, `>` are blocked by policy engine
+4. **Auto-lock** — vault locks after 15 min inactivity, send unlock link again
 5. **Private key stays local** — never transmit `~/.ssh/ssh-vault-agent`
-6. **Credential in request-host** — this is the SSH password or key for the target server, encrypted in vault
 
 ## Error Handling
 
 | Error | Action |
 |-------|--------|
-| "Vault is locked" | Send unlock URL to user via chat |
-| "Session expired" | Request access again |
-| "Command denied" | Tell user, suggest alternative |
-| "Shell injection" | Simplify command, remove pipes |
-| "Rate limited" (429) | Wait and retry |
-
-## File Locations
-
-- Agent keypair: `~/.ssh/ssh-vault-agent` / `~/.ssh/ssh-vault-agent.pub`
-- Vault data: Docker volume `ssh-vault-data`
-- Config: Mounted as `/app/config.yml`
+| Vault locked | Send unlock URL via chat |
+| Session expired | Re-request access |
+| Command denied | Tell user, suggest simpler command |
+| Shell injection | Remove pipes/redirects |
+| Rate limited (429) | Wait and retry |
+| Approval expired | Re-send new approval link |

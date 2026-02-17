@@ -1,0 +1,16 @@
+webauthn:
+  rpId: "{{DOMAIN}}"
+  rpName: "SSH Vault"
+  origin: "{{ORIGIN}}"
+
+web:
+  port: {{PORT}}
+  external_url: "{{ORIGIN}}"
+
+vault:
+  path: /app/data/vault.enc
+  auto_lock_minutes: 15
+
+session:
+  mode: session
+  timeout_minutes: 30
