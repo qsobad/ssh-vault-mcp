@@ -16,6 +16,7 @@ import { VaultManager } from '../vault/vault.js';
 import { PolicyEngine } from '../policy/engine.js';
 import { SSHExecutor } from '../ssh/executor.js';
 import { verifySignedRequest, fingerprintFromPublicKey, type SignedRequest } from '../auth/agent.js';
+import { SnippetManager } from '../snippet/index.js';
 
 // Tool input schemas
 const SubmitUnlockSchema = z.object({
@@ -204,6 +205,75 @@ const TOOLS: Tool[] = [
       required: ['challengeId'],
     },
   },
+  // --- Snippet tools ---
+  {
+    name: 'snippet_save',
+    description: 'Save or update a snippet (note, script, command). Use for storing reusable content that can later be executed via SSH or retrieved as notes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Unique snippet name' },
+        content: { type: 'string', description: 'Snippet content (code, notes, commands)' },
+        description: { type: 'string', description: 'What this snippet does' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Tags for organization' },
+        language: { type: 'string', description: 'Language hint: bash, python, sql, text, etc.' },
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: ['name', 'content', ...SIGNATURE_REQUIRED],
+    },
+  },
+  {
+    name: 'snippet_get',
+    description: 'Retrieve a snippet by name.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Snippet name' },
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: ['name', ...SIGNATURE_REQUIRED],
+    },
+  },
+  {
+    name: 'snippet_list',
+    description: 'List snippets with optional filters (tags, language, search query).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tags: { type: 'array', items: { type: 'string' }, description: 'Filter by tags' },
+        language: { type: 'string', description: 'Filter by language' },
+        query: { type: 'string', description: 'Search in name, description, content' },
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: [...SIGNATURE_REQUIRED],
+    },
+  },
+  {
+    name: 'snippet_delete',
+    description: 'Delete a snippet by name.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Snippet name to delete' },
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: ['name', ...SIGNATURE_REQUIRED],
+    },
+  },
+  {
+    name: 'snippet_run',
+    description: 'Execute a saved snippet on a remote host via SSH. The snippet content is sent as the command.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Snippet name to execute' },
+        host: { type: 'string', description: 'Target host name or ID' },
+        timeout: { type: 'number', description: 'Timeout in seconds (default 30)' },
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: ['name', 'host', ...SIGNATURE_REQUIRED],
+    },
+  },
 ];
 
 export class MCPServer {
@@ -211,6 +281,7 @@ export class MCPServer {
   private vaultManager: VaultManager;
   private policyEngine: PolicyEngine;
   private sshExecutor: SSHExecutor;
+  private snippetManager: SnippetManager;
   private config: Config;
 
   constructor(
@@ -222,6 +293,7 @@ export class MCPServer {
     this.vaultManager = vaultManager;
     this.policyEngine = new PolicyEngine();
     this.sshExecutor = new SSHExecutor();
+    this.snippetManager = new SnippetManager();
 
     this.server = new Server(
       { name: 'ssh-vault-mcp', version: '0.1.0' },
@@ -313,6 +385,21 @@ export class MCPServer {
 
           case 'revoke_session':
             return this.handleRevokeSession(fingerprint);
+
+          case 'snippet_save':
+            return this.handleSnippetSave(typedArgs);
+
+          case 'snippet_get':
+            return this.handleSnippetGet(typedArgs);
+
+          case 'snippet_list':
+            return this.handleSnippetList(typedArgs);
+
+          case 'snippet_delete':
+            return this.handleSnippetDelete(typedArgs);
+
+          case 'snippet_run':
+            return this.handleSnippetRun(typedArgs, fingerprint);
 
           default:
             return {
@@ -681,6 +768,60 @@ export class MCPServer {
         }, null, 2),
       }],
     };
+  }
+
+  // --- Snippet handlers ---
+
+  private handleSnippetSave(args: Record<string, unknown>) {
+    const snippet = this.snippetManager.save({
+      name: args.name as string,
+      content: args.content as string,
+      description: args.description as string | undefined,
+      tags: args.tags as string[] | undefined,
+      language: args.language as string | undefined,
+    });
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ success: true, snippet: { id: snippet.id, name: snippet.name, language: snippet.language, tags: snippet.tags, updatedAt: snippet.updatedAt } }, null, 2) }],
+    };
+  }
+
+  private handleSnippetGet(args: Record<string, unknown>) {
+    const snippet = this.snippetManager.get(args.name as string);
+    if (!snippet) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'Snippet not found' }) }], isError: true };
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(snippet, null, 2) }] };
+  }
+
+  private handleSnippetList(args: Record<string, unknown>) {
+    const snippets = this.snippetManager.list({
+      tags: args.tags as string[] | undefined,
+      language: args.language as string | undefined,
+      query: args.query as string | undefined,
+    });
+    const summary = snippets.map(s => ({
+      name: s.name, description: s.description, tags: s.tags, language: s.language, updatedAt: s.updatedAt,
+    }));
+    return { content: [{ type: 'text', text: JSON.stringify({ count: summary.length, snippets: summary }, null, 2) }] };
+  }
+
+  private handleSnippetDelete(args: Record<string, unknown>) {
+    const deleted = this.snippetManager.delete(args.name as string);
+    return { content: [{ type: 'text', text: JSON.stringify({ success: deleted, message: deleted ? 'Deleted' : 'Not found' }) }] };
+  }
+
+  private async handleSnippetRun(args: Record<string, unknown>, fingerprint: string) {
+    const snippet = this.snippetManager.get(args.name as string);
+    if (!snippet) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'Snippet not found' }) }], isError: true };
+    }
+    // Delegate to execute_command with snippet content
+    return this.handleExecuteCommand(
+      args.host as string,
+      snippet.content,
+      (args.timeout as number) || 30,
+      fingerprint
+    );
   }
 
   async start(): Promise<void> {
