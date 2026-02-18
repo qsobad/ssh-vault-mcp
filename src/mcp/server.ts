@@ -16,6 +16,7 @@ import { VaultManager } from '../vault/vault.js';
 import { PolicyEngine } from '../policy/engine.js';
 import { SSHExecutor } from '../ssh/executor.js';
 import { verifySignedRequest, fingerprintFromPublicKey, type SignedRequest } from '../auth/agent.js';
+import path from 'path';
 import { SnippetManager } from '../snippet/index.js';
 
 // Tool input schemas
@@ -214,17 +215,29 @@ const TOOLS: Tool[] = [
       properties: {
         name: { type: 'string', description: 'Unique snippet name' },
         content: { type: 'string', description: 'Snippet content (code, notes, commands)' },
-        description: { type: 'string', description: 'What this snippet does' },
+        description: { type: 'string', description: 'What this snippet contains — helps agents understand without reading content' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Tags for organization' },
         language: { type: 'string', description: 'Language hint: bash, python, sql, text, etc.' },
         ...SIGNATURE_PROPERTIES,
       },
-      required: ['name', 'content', ...SIGNATURE_REQUIRED],
+      required: ['name', 'content', 'description', ...SIGNATURE_REQUIRED],
     },
   },
   {
     name: 'snippet_get',
-    description: 'Retrieve a snippet by name.',
+    description: 'Get snippet metadata (name, description, tags) WITHOUT content. Use snippet_read to access content (requires user approval).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Snippet name' },
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: ['name', ...SIGNATURE_REQUIRED],
+    },
+  },
+  {
+    name: 'snippet_read',
+    description: 'Read snippet content. Requires Passkey approval because snippets may contain sensitive data (API keys, secrets).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -293,7 +306,8 @@ export class MCPServer {
     this.vaultManager = vaultManager;
     this.policyEngine = new PolicyEngine();
     this.sshExecutor = new SSHExecutor();
-    this.snippetManager = new SnippetManager();
+    // Store snippets alongside vault data
+    this.snippetManager = new SnippetManager(path.dirname(config.vault.path));
 
     this.server = new Server(
       { name: 'ssh-vault-mcp', version: '0.1.0' },
@@ -391,6 +405,9 @@ export class MCPServer {
 
           case 'snippet_get':
             return this.handleSnippetGet(typedArgs);
+
+          case 'snippet_read':
+            return this.handleSnippetRead(typedArgs, fingerprint);
 
           case 'snippet_list':
             return this.handleSnippetList(typedArgs);
@@ -772,25 +789,51 @@ export class MCPServer {
 
   // --- Snippet handlers ---
 
-  private handleSnippetSave(args: Record<string, unknown>) {
-    const snippet = this.snippetManager.save({
+  private async handleSnippetSave(args: Record<string, unknown>) {
+    const meta = await this.snippetManager.save({
       name: args.name as string,
       content: args.content as string,
-      description: args.description as string | undefined,
+      description: args.description as string,
       tags: args.tags as string[] | undefined,
       language: args.language as string | undefined,
     });
     return {
-      content: [{ type: 'text', text: JSON.stringify({ success: true, snippet: { id: snippet.id, name: snippet.name, language: snippet.language, tags: snippet.tags, updatedAt: snippet.updatedAt } }, null, 2) }],
+      content: [{ type: 'text', text: JSON.stringify({ success: true, snippet: meta }, null, 2) }],
     };
   }
 
   private handleSnippetGet(args: Record<string, unknown>) {
-    const snippet = this.snippetManager.get(args.name as string);
-    if (!snippet) {
+    const meta = this.snippetManager.getMeta(args.name as string);
+    if (!meta) {
       return { content: [{ type: 'text', text: JSON.stringify({ error: 'Snippet not found' }) }], isError: true };
     }
-    return { content: [{ type: 'text', text: JSON.stringify(snippet, null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify({ ...meta, note: 'Content hidden. Use snippet_read (requires Passkey approval) to access content.' }, null, 2) }] };
+  }
+
+  private handleSnippetRead(args: Record<string, unknown>, fingerprint: string) {
+    const meta = this.snippetManager.getMeta(args.name as string);
+    if (!meta) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'Snippet not found' }) }], isError: true };
+    }
+    // Require Passkey approval to read content
+    const { approvalUrl, listenUrl, challengeId, expiresAt } = this.vaultManager.createApprovalChallenge(
+      this.config.web.externalUrl,
+      fingerprint,
+      '*',
+      [`snippet_read:${args.name}`]
+    );
+    return {
+      content: [{ type: 'text', text: JSON.stringify({
+        needsApproval: true,
+        snippet: meta.name,
+        description: meta.description,
+        approvalUrl,
+        listenUrl,
+        challengeId,
+        expiresAt,
+        message: `Reading snippet "${meta.name}" requires Passkey approval (may contain sensitive data).`,
+      }, null, 2) }],
+    };
   }
 
   private handleSnippetList(args: Record<string, unknown>) {
@@ -799,32 +842,43 @@ export class MCPServer {
       language: args.language as string | undefined,
       query: args.query as string | undefined,
     });
-    const summary = snippets.map(s => ({
-      name: s.name, description: s.description, tags: s.tags, language: s.language, updatedAt: s.updatedAt,
-    }));
-    return { content: [{ type: 'text', text: JSON.stringify({ count: summary.length, snippets: summary }, null, 2) }] };
+    return { content: [{ type: 'text', text: JSON.stringify({ count: snippets.length, snippets, note: 'Content hidden. Use snippet_read for content access.' }, null, 2) }] };
   }
 
-  private handleSnippetDelete(args: Record<string, unknown>) {
-    const deleted = this.snippetManager.delete(args.name as string);
+  private async handleSnippetDelete(args: Record<string, unknown>) {
+    const deleted = await this.snippetManager.delete(args.name as string);
     return { content: [{ type: 'text', text: JSON.stringify({ success: deleted, message: deleted ? 'Deleted' : 'Not found' }) }] };
   }
 
-  private async handleSnippetRun(args: Record<string, unknown>, fingerprint: string) {
-    const snippet = this.snippetManager.get(args.name as string);
-    if (!snippet) {
+  private handleSnippetRun(args: Record<string, unknown>, fingerprint: string) {
+    const meta = this.snippetManager.getMeta(args.name as string);
+    if (!meta) {
       return { content: [{ type: 'text', text: JSON.stringify({ error: 'Snippet not found' }) }], isError: true };
     }
-    // Delegate to execute_command with snippet content
-    return this.handleExecuteCommand(
+    // Require Passkey approval to execute (reads content + runs on host)
+    const { approvalUrl, listenUrl, challengeId, expiresAt } = this.vaultManager.createApprovalChallenge(
+      this.config.web.externalUrl,
+      fingerprint,
       args.host as string,
-      snippet.content,
-      (args.timeout as number) || 30,
-      fingerprint
+      [`snippet_run:${args.name}`]
     );
+    return {
+      content: [{ type: 'text', text: JSON.stringify({
+        needsApproval: true,
+        snippet: meta.name,
+        description: meta.description,
+        host: args.host,
+        approvalUrl,
+        listenUrl,
+        challengeId,
+        expiresAt,
+        message: `Running snippet "${meta.name}" on ${args.host} requires Passkey approval.`,
+      }, null, 2) }],
+    };
   }
 
   async start(): Promise<void> {
+    await this.snippetManager.init();
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
     console.error('SSH Vault MCP server started');

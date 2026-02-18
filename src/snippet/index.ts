@@ -1,1 +1,1 @@
-export { SnippetManager, type Snippet, type SnippetStore } from './manager.js';
+export { SnippetManager, type Snippet, type SnippetMeta, type SnippetStore } from './manager.js';
