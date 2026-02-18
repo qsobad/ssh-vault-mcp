@@ -15,6 +15,7 @@ import type { Config } from '../types.js';
 import { VaultManager } from '../vault/vault.js';
 import { PolicyEngine } from '../policy/engine.js';
 import { SSHExecutor } from '../ssh/executor.js';
+import { TmuxManager } from '../ssh/tmux-manager.js';
 import { verifySignedRequest, fingerprintFromPublicKey, type SignedRequest } from '../auth/agent.js';
 
 // Tool input schemas
@@ -204,6 +205,89 @@ const TOOLS: Tool[] = [
       required: ['challengeId'],
     },
   },
+  {
+    name: 'ssh_tmux_create',
+    description: 'Create a persistent tmux session on a remote SSH host. Requires unlocked vault and signed request.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        host: {
+          type: 'string',
+          description: 'Host name or ID',
+        },
+        session_name: {
+          type: 'string',
+          description: 'Optional tmux session name (default: mcp-<timestamp>)',
+        },
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: ['host', ...SIGNATURE_REQUIRED],
+    },
+  },
+  {
+    name: 'ssh_tmux_send_keys',
+    description: 'Send keys/text to a tmux session. Requires signed request.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: {
+          type: 'string',
+          description: 'Tmux session ID (from ssh_tmux_create)',
+        },
+        keys: {
+          type: 'string',
+          description: 'Keys/text to send to the tmux session',
+        },
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: ['session_id', 'keys', ...SIGNATURE_REQUIRED],
+    },
+  },
+  {
+    name: 'ssh_tmux_read',
+    description: 'Read current tmux pane content. Requires signed request.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: {
+          type: 'string',
+          description: 'Tmux session ID',
+        },
+        lines: {
+          type: 'number',
+          description: 'Number of lines to capture (default: all visible)',
+        },
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: ['session_id', ...SIGNATURE_REQUIRED],
+    },
+  },
+  {
+    name: 'ssh_tmux_list',
+    description: 'List active tmux sessions managed by this server. Requires signed request.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: SIGNATURE_REQUIRED,
+    },
+  },
+  {
+    name: 'ssh_tmux_kill',
+    description: 'Kill a tmux session and close the SSH connection. Requires signed request.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: {
+          type: 'string',
+          description: 'Tmux session ID to kill',
+        },
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: ['session_id', ...SIGNATURE_REQUIRED],
+    },
+  },
 ];
 
 export class MCPServer {
@@ -211,6 +295,7 @@ export class MCPServer {
   private vaultManager: VaultManager;
   private policyEngine: PolicyEngine;
   private sshExecutor: SSHExecutor;
+  private tmuxManager: TmuxManager;
   private config: Config;
 
   constructor(
@@ -222,6 +307,7 @@ export class MCPServer {
     this.vaultManager = vaultManager;
     this.policyEngine = new PolicyEngine();
     this.sshExecutor = new SSHExecutor();
+    this.tmuxManager = new TmuxManager();
 
     this.server = new Server(
       { name: 'ssh-vault-mcp', version: '0.1.0' },
@@ -313,6 +399,21 @@ export class MCPServer {
 
           case 'revoke_session':
             return this.handleRevokeSession(fingerprint);
+
+          case 'ssh_tmux_create':
+            return this.handleTmuxCreate(typedArgs, fingerprint);
+
+          case 'ssh_tmux_send_keys':
+            return this.handleTmuxSendKeys(typedArgs, fingerprint);
+
+          case 'ssh_tmux_read':
+            return this.handleTmuxRead(typedArgs, fingerprint);
+
+          case 'ssh_tmux_list':
+            return this.handleTmuxList(fingerprint);
+
+          case 'ssh_tmux_kill':
+            return this.handleTmuxKill(typedArgs, fingerprint);
 
           default:
             return {
@@ -681,6 +782,81 @@ export class MCPServer {
         }, null, 2),
       }],
     };
+  }
+
+  private async handleTmuxCreate(args: Record<string, unknown>, fingerprint: string) {
+    if (!this.vaultManager.isUnlocked()) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'Vault is locked. Use request_unlock first.' }, null, 2) }], isError: true };
+    }
+    const hostName = args.host as string;
+    const host = this.vaultManager.getHost(hostName);
+    if (!host) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: `Host not found: ${hostName}` }, null, 2) }], isError: true };
+    }
+    const agent = this.vaultManager.getAgent(fingerprint);
+    if (!agent) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: `Agent not registered. Fingerprint: ${fingerprint}` }, null, 2) }], isError: true };
+    }
+    const session = this.vaultManager.getSessionByAgent(fingerprint);
+    if (!session) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'No active session. Use request_unlock first.' }, null, 2) }], isError: true };
+    }
+    try {
+      const result = await this.tmuxManager.createSession(host, args.session_name as string | undefined);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: error instanceof Error ? error.message : 'Failed to create tmux session' }, null, 2) }], isError: true };
+    }
+  }
+
+  private async handleTmuxSendKeys(args: Record<string, unknown>, fingerprint: string) {
+    if (!this.vaultManager.isUnlocked()) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'Vault is locked.' }, null, 2) }], isError: true };
+    }
+    const agent = this.vaultManager.getAgent(fingerprint);
+    if (!agent) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: `Agent not registered. Fingerprint: ${fingerprint}` }, null, 2) }], isError: true };
+    }
+    try {
+      const result = await this.tmuxManager.sendKeys(args.session_id as string, args.keys as string);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: error instanceof Error ? error.message : 'Failed to send keys' }, null, 2) }], isError: true };
+    }
+  }
+
+  private async handleTmuxRead(args: Record<string, unknown>, fingerprint: string) {
+    if (!this.vaultManager.isUnlocked()) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'Vault is locked.' }, null, 2) }], isError: true };
+    }
+    const agent = this.vaultManager.getAgent(fingerprint);
+    if (!agent) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: `Agent not registered. Fingerprint: ${fingerprint}` }, null, 2) }], isError: true };
+    }
+    try {
+      const result = await this.tmuxManager.readPane(args.session_id as string, args.lines as number | undefined);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: error instanceof Error ? error.message : 'Failed to read pane' }, null, 2) }], isError: true };
+    }
+  }
+
+  private handleTmuxList(_fingerprint: string) {
+    const sessions = this.tmuxManager.listSessions();
+    return { content: [{ type: 'text', text: JSON.stringify({ sessions }, null, 2) }] };
+  }
+
+  private async handleTmuxKill(args: Record<string, unknown>, fingerprint: string) {
+    const agent = this.vaultManager.getAgent(fingerprint);
+    if (!agent) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: `Agent not registered. Fingerprint: ${fingerprint}` }, null, 2) }], isError: true };
+    }
+    try {
+      await this.tmuxManager.killSession(args.session_id as string);
+      return { content: [{ type: 'text', text: JSON.stringify({ success: true, message: 'Session killed' }, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: error instanceof Error ? error.message : 'Failed to kill session' }, null, 2) }], isError: true };
+    }
   }
 
   async start(): Promise<void> {
