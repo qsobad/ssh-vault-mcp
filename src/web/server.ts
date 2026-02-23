@@ -1236,7 +1236,26 @@ export class WebServer {
         return;
       }
 
+      // Require passkey re-verification
+      const { challengeId, webauthnResponse } = req.body || {};
+      if (!challengeId || !webauthnResponse) {
+        res.status(403).json({ error: 'Passkey verification required' });
+        return;
+      }
+
       try {
+        const metadata = await this.vaultManager.getMetadata();
+        if (!metadata) { res.status(404).json({ error: 'No vault' }); return; }
+
+        let verified = false;
+        for (const cred of metadata.credentials) {
+          const result = await this.webauthn.verifyAuthentication(challengeId, webauthnResponse, {
+            id: cred.id, publicKey: cred.publicKey, algorithm: cred.algorithm, counter: 0, createdAt: 0,
+          });
+          if (result.success) { verified = true; break; }
+        }
+        if (!verified) { res.status(403).json({ error: 'Passkey verification failed' }); return; }
+
         const { VaultStorage } = await import('../vault/storage.js');
         const storage = new VaultStorage(this.config.vault.path, true);
         const vault = await storage.load(session.vek);
@@ -1358,7 +1377,26 @@ export class WebServer {
         return;
       }
 
+      // Require passkey re-verification
+      const { challengeId, webauthnResponse } = req.body || {};
+      if (!challengeId || !webauthnResponse) {
+        res.status(403).json({ error: 'Passkey verification required' });
+        return;
+      }
+
       try {
+        const metadata = await this.vaultManager.getMetadata();
+        if (!metadata) { res.status(404).json({ error: 'No vault' }); return; }
+
+        let verified = false;
+        for (const cred of metadata.credentials) {
+          const result = await this.webauthn.verifyAuthentication(challengeId, webauthnResponse, {
+            id: cred.id, publicKey: cred.publicKey, algorithm: cred.algorithm, counter: 0, createdAt: 0,
+          });
+          if (result.success) { verified = true; break; }
+        }
+        if (!verified) { res.status(403).json({ error: 'Passkey verification failed' }); return; }
+
         const { VaultStorage } = await import('../vault/storage.js');
         const storage = new VaultStorage(this.config.vault.path, true);
         const vault = await storage.load(session.vek);
