@@ -28,7 +28,7 @@
       padding: 20px;
     }
 
-    .container { max-width: 1000px; margin: 0 auto; }
+    .container { max-width: 1000px; margin: 0 auto; overflow-x: hidden; }
 
     header {
       display: flex;
@@ -136,6 +136,9 @@
       padding: 24px;
       width: 100%;
       max-width: 500px;
+      max-width: min(500px, calc(100vw - 24px));
+      overflow-x: hidden;
+      word-break: break-word;
     }
     .modal-header {
       display: flex;
@@ -183,7 +186,8 @@
       border-radius: 16px;
       padding: 40px;
       text-align: center;
-      max-width: 400px;
+      width: 100%;
+      max-width: min(400px, calc(100vw - 24px));
     }
     .auth-card .logo { font-size: 48px; margin-bottom: 16px; }
     .auth-card h2 { margin-bottom: 8px; }
@@ -240,7 +244,9 @@
         margin: 12px;
         padding: 24px;
         max-width: calc(100vw - 24px);
+        word-break: break-word;
       }
+      .card { overflow-x: hidden; word-break: break-word; }
     }
 
     @media (max-width: 480px) {
