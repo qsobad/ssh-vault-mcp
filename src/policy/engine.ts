@@ -202,13 +202,8 @@ export class PolicyEngine {
     patterns: string[];
   } {
     const shellPatterns: { pattern: RegExp; description: string }[] = [
-      { pattern: /\|/, description: 'pipe' },
-      { pattern: />>/, description: 'append redirect' },
-      { pattern: /(?<!>)>(?!>)/, description: 'redirect' },
-      { pattern: /</, description: 'input redirect' },
       { pattern: /;/, description: 'command separator' },
       { pattern: /&&/, description: 'logical AND' },
-      { pattern: /\|\|/, description: 'logical OR' },
       { pattern: /`/, description: 'backtick substitution' },
       { pattern: /\$\(/, description: 'command substitution' },
     ];
