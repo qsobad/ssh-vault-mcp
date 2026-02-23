@@ -32,7 +32,6 @@ export interface AgentConfig {
 export interface GlobalPolicy {
   allowedCommands: string[];  // Global whitelist: ["ls", "cat", "grep", "pwd"]
   deniedCommands: string[];   // Global blacklist: ["rm -rf", "mkfs", "dd if="]
-  allowShellOperators?: boolean; // Allow pipe, redirect, etc. (default: false)
 }
 
 export interface Session {

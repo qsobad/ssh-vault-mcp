@@ -462,14 +462,6 @@
             <button class="btn btn-primary btn-sm" onclick="addPolicyCommand('denied')">Add</button>
           </div>
         </div>
-        <div style="margin-bottom: 24px;">
-          <h3 style="font-size: 15px; margin-bottom: 8px;">🔧 Shell Operators</h3>
-          <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px;">
-            <input type="checkbox" id="allowShellOperators" style="width: 18px; height: 18px;">
-            Allow pipe (<code>|</code>), redirect (<code>&gt;</code>), and other shell operators
-          </label>
-          <p style="font-size: 12px; color: var(--text-dim); margin-top: 4px;">⚠️ Enabling this reduces protection against shell injection.</p>
-        </div>
         <button class="btn btn-primary" onclick="savePolicy()" style="width: 100%;">💾 Save Policy</button>
         <div id="policySaveStatus" style="text-align: center; margin-top: 12px; font-size: 13px; display: none;"></div>
       </div>
@@ -1393,7 +1385,6 @@
       policyDenied = [...(policy.deniedCommands || [])];
       renderPolicyTags('allowed');
       renderPolicyTags('denied');
-      document.getElementById('allowShellOperators').checked = !!policy.allowShellOperators;
     }
 
     function renderPolicyTags(type) {
@@ -1428,7 +1419,7 @@
         const res = await fetch('/api/manage/policy', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
-          body: JSON.stringify({ allowedCommands: policyAllowed, deniedCommands: policyDenied, allowShellOperators: document.getElementById('allowShellOperators').checked })
+          body: JSON.stringify({ allowedCommands: policyAllowed, deniedCommands: policyDenied })
         });
         const result = await res.json();
         if (result.success) {
