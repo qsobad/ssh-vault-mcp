@@ -256,11 +256,14 @@ export class WebServer {
         return;
       }
 
-      // Check shell injection
-      const injectionCheck = this.policyEngine.checkShellInjection(command);
-      if (injectionCheck.injection) {
-        res.status(403).json({ error: `Shell injection detected: ${injectionCheck.patterns.join(', ')}` });
-        return;
+      // Check shell injection (skip if policy allows shell operators)
+      const policy = this.vaultManager.getPolicy();
+      if (!policy?.allowShellOperators) {
+        const injectionCheck = this.policyEngine.checkShellInjection(command);
+        if (injectionCheck.injection) {
+          res.status(403).json({ error: `Shell injection detected: ${injectionCheck.patterns.join(', ')}` });
+          return;
+        }
       }
 
       // Policy engine check
@@ -270,7 +273,6 @@ export class WebServer {
         return;
       }
 
-      const policy = this.vaultManager.getPolicy();
       const policyCheck = this.policyEngine.checkCommand(agent, host, command, policy, session);
       if (!policyCheck.allowed) {
         res.status(403).json({ error: `Policy denied: ${policyCheck.reason}` });
@@ -1261,7 +1263,7 @@ export class WebServer {
       }
 
       try {
-        const { allowedCommands, deniedCommands } = req.body;
+        const { allowedCommands, deniedCommands, allowShellOperators } = req.body;
         const { VaultStorage } = await import('../vault/storage.js');
         const storage = new VaultStorage(this.config.vault.path, true);
         const vault = await storage.load(session.vek);
@@ -1269,6 +1271,7 @@ export class WebServer {
         vault.policy = {
           allowedCommands: Array.isArray(allowedCommands) ? allowedCommands : [],
           deniedCommands: Array.isArray(deniedCommands) ? deniedCommands : [],
+          allowShellOperators: !!allowShellOperators,
         };
 
         await storage.save(vault, session.vek);
