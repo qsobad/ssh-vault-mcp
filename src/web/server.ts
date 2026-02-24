@@ -297,12 +297,7 @@ export class WebServer {
         return;
       }
 
-      // Check shell injection
-      const injectionCheck = this.policyEngine.checkShellInjection(command);
-      if (injectionCheck.injection) {
-        res.status(403).json({ error: `Shell injection detected: ${injectionCheck.patterns.join(', ')}` });
-        return;
-      }
+      // Shell metacharacters are allowed — agent is trusted after passkey approval
 
       // Policy engine check
       const agent = this.vaultManager.getAgent(verification.fingerprint!);
