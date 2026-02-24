@@ -240,26 +240,30 @@ export class WebServer {
         return;
       }
 
-      // Require valid session
-      if (!sessionId) {
-        res.status(401).json({ error: 'sessionId required' });
+      // Auto-unlock flow: if no session or vault locked, create unlock challenge
+      const needsUnlock = !this.vaultManager.isUnlocked();
+      let session = sessionId ? this.vaultManager.getSession(sessionId) : null;
+      const needsSession = !session || (session && session.agentFingerprint !== verification.fingerprint);
+
+      if (needsUnlock || needsSession) {
+        const { challengeId, unlockUrl, listenUrl, expiresAt } = this.vaultManager.createUnlockChallenge(
+          this.config.web.externalUrl,
+          verification.fingerprint!
+        );
+        res.status(401).json({
+          error: needsUnlock ? 'Vault is locked' : 'No valid session',
+          needsUnlock: true,
+          challengeId,
+          unlockUrl,
+          listenUrl,
+          expiresAt,
+          message: 'User approval required. Present the unlockUrl to the user.',
+        });
         return;
       }
 
-      const session = this.vaultManager.getSession(sessionId);
       if (!session) {
-        res.status(401).json({ error: 'Invalid or expired session' });
-        return;
-      }
-
-      // Verify session belongs to this agent
-      if (session.agentFingerprint !== verification.fingerprint) {
-        res.status(403).json({ error: 'Session does not belong to this agent' });
-        return;
-      }
-
-      if (!this.vaultManager.isUnlocked()) {
-        res.status(403).json({ error: 'Vault is locked' });
+        res.status(401).json({ error: 'Invalid session' });
         return;
       }
 
