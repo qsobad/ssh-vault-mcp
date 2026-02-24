@@ -240,24 +240,26 @@ export class WebServer {
         return;
       }
 
-      // Auto-unlock flow: if no session or vault locked, create unlock challenge
+      // Auto-access flow: if no session or vault locked, create approval challenge
       const needsUnlock = !this.vaultManager.isUnlocked();
       let session = sessionId ? this.vaultManager.getSession(sessionId) : null;
       const needsSession = !session || (session && session.agentFingerprint !== verification.fingerprint);
 
       if (needsUnlock || needsSession) {
-        const { challengeId, unlockUrl, listenUrl, expiresAt } = this.vaultManager.createUnlockChallenge(
+        const { approvalUrl, listenUrl, challengeId, expiresAt } = this.vaultManager.createApprovalChallenge(
           this.config.web.externalUrl,
-          verification.fingerprint!
+          verification.fingerprint!,
+          host,
+          [`execute:${host}`]
         );
         res.status(401).json({
           error: needsUnlock ? 'Vault is locked' : 'No valid session',
-          needsUnlock: true,
+          needsApproval: true,
           challengeId,
-          unlockUrl,
+          approvalUrl,
           listenUrl,
           expiresAt,
-          message: 'User approval required. Present the unlockUrl to the user.',
+          message: 'User approval required. Present the approvalUrl to the user.',
         });
         return;
       }
