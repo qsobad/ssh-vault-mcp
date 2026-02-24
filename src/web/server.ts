@@ -246,20 +246,30 @@ export class WebServer {
       const needsSession = !session || (session && session.agentFingerprint !== verification.fingerprint);
 
       if (needsUnlock || needsSession) {
-        const { approvalUrl, listenUrl, challengeId, expiresAt } = this.vaultManager.createApprovalChallenge(
-          this.config.web.externalUrl,
-          verification.fingerprint!,
+        // Create exec-request for one-step approve-and-execute flow
+        const execReqId = crypto.randomUUID();
+        const expiresAt = Date.now() + 5 * 60 * 1000;
+        pendingExecRequests.set(execReqId, {
+          id: execReqId,
           host,
-          [`execute:${host}`]
-        );
+          command,
+          agentFingerprint: verification.fingerprint!,
+          timeout: timeout || 30,
+          signature: { signature, publicKey, timestamp, nonce },
+          status: 'pending',
+          expiresAt,
+          listeners: new Set(),
+        });
+        const approvalUrl = `${this.config.web.externalUrl}/approve-exec?id=${execReqId}`;
+        const listenUrl = `${this.config.web.externalUrl}/api/vault/exec-request/${execReqId}/listen`;
         res.status(401).json({
           error: needsUnlock ? 'Vault is locked' : 'No valid session',
           needsApproval: true,
-          challengeId,
+          execRequestId: execReqId,
           approvalUrl,
           listenUrl,
           expiresAt,
-          message: 'User approval required. Present the approvalUrl to the user.',
+          message: 'User approval required. Present the approvalUrl to the user and listen on listenUrl for the result.',
         });
         return;
       }
@@ -1312,6 +1322,328 @@ export class WebServer {
       if (!hr) { res.status(404).json({ error: 'Not found' }); return; }
       hr.status = 'rejected';
       res.json({ success: true });
+    });
+
+    // --- Exec Request (approve-and-execute in one flow) ---
+    const pendingExecRequests = new Map<string, {
+      id: string;
+      host: string;
+      command: string;
+      agentFingerprint: string;
+      timeout: number;
+      signature: { signature: string; publicKey: string; timestamp: number; nonce: string };
+      status: 'pending' | 'approved' | 'executing' | 'completed' | 'failed' | 'rejected';
+      stdout?: string;
+      stderr?: string;
+      exitCode?: number;
+      error?: string;
+      sessionId?: string;
+      expiresAt: number;
+      listeners: Set<(event: any) => void>;
+    }>();
+
+    // Cleanup expired exec requests periodically
+    setInterval(() => {
+      const now = Date.now();
+      for (const [id, req] of pendingExecRequests) {
+        if (req.expiresAt < now) pendingExecRequests.delete(id);
+      }
+    }, 60 * 1000);
+
+    // Get exec request info
+    this.app.get('/api/vault/exec-request/:id', (req: Request, res: Response) => {
+      const er = pendingExecRequests.get(req.params.id);
+      if (!er || er.expiresAt < Date.now()) {
+        res.status(404).json({ error: 'Request not found or expired' });
+        return;
+      }
+      const result: any = {
+        id: er.id,
+        host: er.host,
+        command: er.command,
+        status: er.status,
+        expiresAt: er.expiresAt,
+      };
+      if (er.status === 'completed' || er.status === 'failed') {
+        result.stdout = er.stdout;
+        result.stderr = er.stderr;
+        result.exitCode = er.exitCode;
+        result.error = er.error;
+        result.sessionId = er.sessionId;
+      }
+      res.json(result);
+    });
+
+    // SSE listen for exec request status
+    this.app.get('/api/vault/exec-request/:id/listen', (req: Request, res: Response) => {
+      const er = pendingExecRequests.get(req.params.id);
+      if (!er || er.expiresAt < Date.now()) {
+        res.status(404).json({ error: 'Request not found or expired' });
+        return;
+      }
+
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.flushHeaders();
+
+      res.write(`data: ${JSON.stringify({ status: er.status })}\n\n`);
+
+      // If already done, send result and close
+      if (er.status === 'completed' || er.status === 'failed' || er.status === 'rejected') {
+        res.write(`data: ${JSON.stringify({
+          status: er.status, stdout: er.stdout, stderr: er.stderr,
+          exitCode: er.exitCode, error: er.error, sessionId: er.sessionId,
+        })}\n\n`);
+        res.end();
+        return;
+      }
+
+      const listener = (event: any) => {
+        try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch {}
+        if (event.status === 'completed' || event.status === 'failed' || event.status === 'rejected') {
+          try { res.end(); } catch {}
+        }
+      };
+      er.listeners.add(listener);
+
+      req.on('close', () => { er.listeners.delete(listener); });
+
+      // Timeout
+      const timeoutMs = er.expiresAt - Date.now();
+      if (timeoutMs > 0) {
+        setTimeout(() => {
+          try {
+            res.write(`data: ${JSON.stringify({ status: 'expired' })}\n\n`);
+            res.end();
+          } catch {}
+          er.listeners.delete(listener);
+        }, timeoutMs);
+      }
+    });
+
+    // Approve exec request (passkey + password, then execute)
+    this.app.post('/api/vault/exec-request/:id/approve', async (req: Request, res: Response) => {
+      if (!checkRateLimit(req.ip || 'unknown')) {
+        res.status(429).json({ error: 'Too many attempts. Try again later.' });
+        return;
+      }
+
+      const er = pendingExecRequests.get(req.params.id);
+      if (!er || er.expiresAt < Date.now()) {
+        res.status(404).json({ error: 'Request not found or expired' });
+        return;
+      }
+      if (er.status !== 'pending') {
+        res.status(400).json({ error: `Request already ${er.status}` });
+        return;
+      }
+
+      const { password, webauthnChallengeId, webauthnResponse } = req.body;
+      if (!password || !webauthnChallengeId || !webauthnResponse) {
+        res.status(400).json({ error: 'password, webauthnChallengeId, and webauthnResponse required' });
+        return;
+      }
+
+      try {
+        // Step 1: Verify WebAuthn
+        const metadata = await this.vaultManager.getMetadata();
+        if (!metadata) { res.status(404).json({ error: 'No vault found' }); return; }
+
+        let webauthnResult: any = { success: false, error: 'No matching credential' };
+        for (const cred of metadata.credentials) {
+          webauthnResult = await this.webauthn.verifyAuthentication(
+            webauthnChallengeId, webauthnResponse,
+            { id: cred.id, publicKey: cred.publicKey, algorithm: cred.algorithm, counter: 0, createdAt: 0 }
+          );
+          if (webauthnResult.success) break;
+        }
+        if (!webauthnResult.success) {
+          res.status(401).json({ error: webauthnResult.error || 'Passkey verification failed' });
+          return;
+        }
+
+        // Step 2: Derive VEK from password
+        const authMeta = await this.vaultManager.getAuthMetadata();
+        if (!authMeta) { res.status(404).json({ error: 'No vault found' }); return; }
+        const { deriveKeyFromPassword, fromBase64, secureWipe: wipe } = await import('../vault/encryption.js');
+        const passwordSalt = fromBase64(authMeta.passwordSalt);
+        const vek = deriveKeyFromPassword(password, passwordSalt, authMeta.kdfParams);
+
+        // Step 3: Verify VEK by loading vault
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storageCheck = new VaultStorage(this.config.vault.path, false);
+        try { await storageCheck.load(vek); } catch {
+          res.status(401).json({ error: 'Invalid password' });
+          return;
+        }
+
+        // Step 4: Unlock vault if needed & create session
+        const emitStatus = (event: any) => {
+          for (const listener of er.listeners) {
+            try { listener(event); } catch {}
+          }
+        };
+
+        er.status = 'approved';
+        emitStatus({ status: 'approved' });
+
+        // Unlock vault with VEK
+        if (!this.vaultManager.isUnlocked()) {
+          const uc = this.vaultManager.createUnlockChallenge(this.config.web.externalUrl, er.agentFingerprint);
+          const completed = await this.vaultManager.completeChallenge(uc.challengeId, vek, true);
+          if (completed?.unlockCode) {
+            await this.vaultManager.submitUnlockCode(completed.unlockCode, er.agentFingerprint);
+          }
+        }
+
+        if (!this.vaultManager.isUnlocked()) {
+          er.status = 'failed';
+          er.error = 'Failed to unlock vault';
+          emitStatus({ status: 'failed', error: er.error });
+          res.status(500).json({ error: 'Failed to unlock vault' });
+          return;
+        }
+
+        // Create/get session for agent
+        let session = this.vaultManager.getSessionByAgent(er.agentFingerprint);
+        if (!session) {
+          // Use the access request flow to create a session
+          const accessChallenge = this.vaultManager.createAccessRequestChallenge(
+            this.config.web.externalUrl,
+            { name: 'exec-agent', fingerprint: er.agentFingerprint, publicKey: '', requestedHosts: [er.host, '*'] }
+          );
+          const accessCompleted = await this.vaultManager.completeChallenge(accessChallenge.challengeId, vek, true);
+          if (accessCompleted?.unlockCode) {
+            await this.vaultManager.submitUnlockCode(accessCompleted.unlockCode, er.agentFingerprint);
+          }
+          session = this.vaultManager.getSessionByAgent(er.agentFingerprint);
+        }
+
+        if (!session) {
+          er.status = 'failed';
+          er.error = 'Failed to create session';
+          emitStatus({ status: 'failed', error: er.error });
+          res.status(500).json({ error: 'Failed to create session' });
+          return;
+        }
+
+        // Ensure host is in approved hosts
+        if (!session.approvedHosts.includes('*') && !session.approvedHosts.includes(er.host)) {
+          session.approvedHosts.push(er.host);
+        }
+
+        er.sessionId = session.id;
+
+        // Step 5: Execute the command
+        er.status = 'executing';
+        emitStatus({ status: 'executing' });
+
+        try {
+          await this.vaultManager.reloadVault();
+          const hostConfig = this.vaultManager.getHost(er.host);
+          if (!hostConfig) {
+            er.status = 'failed';
+            er.error = `Host '${er.host}' not found`;
+            emitStatus({ status: 'failed', error: er.error });
+            res.json({ status: 'failed', error: er.error, sessionId: session.id });
+            return;
+          }
+
+          let credential: string;
+          try {
+            credential = await this.vaultManager.decryptHostCredential(er.host);
+          } catch (err) {
+            er.status = 'failed';
+            er.error = 'Failed to decrypt credential';
+            emitStatus({ status: 'failed', error: er.error });
+            res.json({ status: 'failed', error: er.error, sessionId: session.id });
+            return;
+          }
+
+          const { Client: SSHClient } = await import('ssh2');
+          const ssh = new SSHClient();
+          const execTimeout = Math.min(Math.max(er.timeout, 1), 300);
+
+          const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolve, reject) => {
+            ssh.on('ready', () => {
+              ssh.exec(er.command, (err, stream) => {
+                if (err) { ssh.end(); reject(err); return; }
+                let stdout = '';
+                let stderr = '';
+                stream.on('data', (data: Buffer) => { stdout += data.toString(); });
+                stream.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
+                stream.on('close', (code: number) => { ssh.end(); resolve({ stdout, stderr, code }); });
+              });
+            });
+            ssh.on('error', reject);
+
+            const connectConfig: any = {
+              host: hostConfig.hostname,
+              port: hostConfig.port || 22,
+              username: hostConfig.username,
+              readyTimeout: execTimeout * 1000,
+            };
+            if (hostConfig.authType === 'key' || credential.includes('PRIVATE KEY')) {
+              connectConfig.privateKey = credential;
+            } else {
+              connectConfig.password = credential;
+            }
+            ssh.connect(connectConfig);
+            setTimeout(() => { ssh.end(); reject(new Error(`Command timed out after ${execTimeout}s`)); }, execTimeout * 1000);
+          });
+
+          // Wipe credential
+          const credBuf = Buffer.from(credential);
+          const credArr = new Uint8Array(credBuf.buffer, credBuf.byteOffset, credBuf.byteLength);
+          wipe(credArr);
+
+          er.status = 'completed';
+          er.stdout = result.stdout;
+          er.stderr = result.stderr;
+          er.exitCode = result.code;
+
+          this.vaultManager.touchSession(session.id);
+
+          const completedEvent = {
+            status: 'completed', stdout: result.stdout, stderr: result.stderr,
+            exitCode: result.code, sessionId: session.id,
+          };
+          emitStatus(completedEvent);
+          res.json(completedEvent);
+
+        } catch (execErr) {
+          er.status = 'failed';
+          er.error = execErr instanceof Error ? execErr.message : String(execErr);
+          const failEvent = { status: 'failed', error: er.error, sessionId: session.id };
+          emitStatus(failEvent);
+          res.json(failEvent);
+        }
+      } catch (error) {
+        er.status = 'failed';
+        er.error = error instanceof Error ? error.message : 'Approval failed';
+        for (const listener of er.listeners) {
+          try { listener({ status: 'failed', error: er.error }); } catch {}
+        }
+        res.status(500).json({ error: er.error });
+      }
+    });
+
+    // Reject exec request
+    this.app.post('/api/vault/exec-request/:id/reject', (_req: Request, res: Response) => {
+      const er = pendingExecRequests.get(_req.params.id);
+      if (!er) { res.status(404).json({ error: 'Not found' }); return; }
+      er.status = 'rejected';
+      for (const listener of er.listeners) {
+        try { listener({ status: 'rejected' }); } catch {}
+      }
+      res.json({ success: true });
+    });
+
+    // Serve exec approval page
+    this.app.get('/approve-exec', (_req: Request, res: Response) => {
+      res.sendFile(path.join(__dirname, '../../web/approve-exec.html'));
     });
 
     // Serve host approval page
