@@ -52,6 +52,7 @@ Add to your MCP client config:
         "-v", "ssh-vault-data:/app/data",
         "-v", "ssh-vault-config:/app/config",
         "-e", "SSH_VAULT_DOMAIN=localhost",
+        "-e", "SSH_VAULT_ORIGIN=http://localhost:3001",
         "qsobad/ssh-vault-mcp:latest"
       ]
     }
