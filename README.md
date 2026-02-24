@@ -33,7 +33,7 @@ docker run -d -p 3001:3001 \
 
 - **Config:** `/app/config/config.yml` — auto-created with localhost defaults if missing
 - **Data:** `/app/data/` — encrypted vault storage (persist this!)
-- **Custom domain:** set `SSH_VAULT_DOMAIN` env var (e.g. `-e SSH_VAULT_DOMAIN=ssh.example.com`)
+- **Custom domain:** set `SSH_VAULT_ORIGIN` env var (e.g. `-e SSH_VAULT_ORIGIN=https://ssh.example.com`)
 
 Open `http://localhost:3001` → set Master Password → register Passkey → done.
 
@@ -51,7 +51,6 @@ Add to your MCP client config:
         "-p", "3001:3001",
         "-v", "ssh-vault-data:/app/data",
         "-v", "ssh-vault-config:/app/config",
-        "-e", "SSH_VAULT_DOMAIN=localhost",
         "-e", "SSH_VAULT_ORIGIN=http://localhost:3001",
         "qsobad/ssh-vault-mcp:latest"
       ]
@@ -113,7 +112,7 @@ session:
   timeout_minutes: 15
 ```
 
-Environment variable overrides: `SSH_VAULT_DOMAIN`, `SSH_VAULT_PORT`, `SSH_VAULT_ORIGIN`, `SSH_VAULT_DATA_PATH`
+Environment variable overrides: `SSH_VAULT_ORIGIN`, `SSH_VAULT_PORT`, `SSH_VAULT_DATA_PATH`
 
 ## Technical Details
 

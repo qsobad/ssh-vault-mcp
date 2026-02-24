@@ -26,7 +26,7 @@ docker run -d -p 3001:3001 \
 
 - `/app/config/config.yml` — auto-created with localhost defaults if missing
 - `/app/data` — encrypted vault storage
-- Set `SSH_VAULT_DOMAIN` env var for custom domain (overrides config)
+- Set `SSH_VAULT_ORIGIN env var for custom origin (e.g. https://ssh.example.com))
 
 ## Execution
 

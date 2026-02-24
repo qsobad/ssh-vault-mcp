@@ -97,31 +97,22 @@ export async function loadConfig(configPath?: string): Promise<Config> {
 
 /**
  * Apply environment variable overrides.
- * Supports: SSH_VAULT_DOMAIN, SSH_VAULT_PORT, SSH_VAULT_ORIGIN, SSH_VAULT_DATA_PATH, PORT
+ * Supports: SSH_VAULT_ORIGIN, SSH_VAULT_PORT, SSH_VAULT_DATA_PATH, PORT
  */
 function applyEnvOverrides(config: Config): Config {
-  const domain = process.env.SSH_VAULT_DOMAIN;
-  const port = process.env.SSH_VAULT_PORT || process.env.PORT;
   const origin = process.env.SSH_VAULT_ORIGIN;
+  const port = process.env.SSH_VAULT_PORT || process.env.PORT;
   const dataPath = process.env.SSH_VAULT_DATA_PATH;
 
-  if (domain) {
-    const isLocal = domain === 'localhost' || domain.startsWith('127.');
-    const proto = isLocal ? 'http' : 'https';
-    const defaultOrigin = port && isLocal ? `${proto}://${domain}:${port}` : `${proto}://${domain}`;
-
-    config.webauthn.rpId = domain;
-    config.webauthn.origin = origin || defaultOrigin;
-    config.web.externalUrl = origin || defaultOrigin;
+  if (origin) {
+    const url = new URL(origin);
+    config.webauthn.rpId = url.hostname;
+    config.webauthn.origin = origin;
+    config.web.externalUrl = origin;
   }
 
   if (port) {
     config.web.port = parseInt(port, 10);
-  }
-
-  if (origin) {
-    config.webauthn.origin = origin;
-    config.web.externalUrl = origin;
   }
 
   if (dataPath) {
