@@ -21,10 +21,16 @@ const sodium = _sodium;
 const VAULT_URL = process.env.SSH_VAULT_URL || 'https://ssh.29cp.cn';
 const SESSION_FILE = '/tmp/ssh-vault-session.json';
 
-// Agent keys
-const PRIVATE_KEY_B64 = 'r3ks3AHJBpgbNQbXjihnqnbUQsHGa+hFKr4d0ke+ncoT5r23QOyIvQcjZOuQfu4UMda8ZMz/2fFocMezEOgM8g==';
-const PUBLIC_KEY_B64 = 'E+a9t0DsiL0HI2TrkH7uFDHWvGTM/9nxaHDHsxDoDPI=';
-const FINGERPRINT = 'SHA256:sjrA8QqON8WdcBvu59bQW7F8RbsuUJ8fuioD9A+PTPM';
+// Agent keys — read from environment variables
+const PRIVATE_KEY_B64 = process.env.SSH_VAULT_AGENT_PRIVATE_KEY;
+const PUBLIC_KEY_B64 = process.env.SSH_VAULT_AGENT_PUBLIC_KEY;
+const FINGERPRINT = process.env.SSH_VAULT_AGENT_FINGERPRINT || '';
+
+if (!PRIVATE_KEY_B64 || !PUBLIC_KEY_B64) {
+  console.error('Error: SSH_VAULT_AGENT_PRIVATE_KEY and SSH_VAULT_AGENT_PUBLIC_KEY env vars required');
+  process.exit(1);
+}
+
 const PRIVATE_KEY = Buffer.from(PRIVATE_KEY_B64, 'base64');
 
 function sign(payloadObj) {

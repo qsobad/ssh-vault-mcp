@@ -7,7 +7,13 @@ description: "Execute SSH commands on remote hosts via SSH Vault MCP. Use when: 
 
 Execute SSH commands on remote hosts through a self-hosted SSH Vault instance.
 
-User has deployed SSH Vault via Docker. Ask for their vault URL if not known, then set `SSH_VAULT_URL`.
+User has deployed SSH Vault via Docker. Ask for their vault URL if not known.
+
+Required env vars:
+- `SSH_VAULT_URL` — vault URL
+- `SSH_VAULT_AGENT_PRIVATE_KEY` — agent Ed25519 private key (base64)
+- `SSH_VAULT_AGENT_PUBLIC_KEY` — agent Ed25519 public key (base64)
+- `SSH_VAULT_AGENT_FINGERPRINT` — agent fingerprint (optional)
 
 ## Docker Setup (user-managed)
 
@@ -25,7 +31,7 @@ docker run -d -p 3001:3001 \
 ## Execution
 
 ```bash
-SSH_VAULT_URL=<url> node scripts/vault.mjs exec <host> <command> [timeout]
+node scripts/vault.mjs exec <host> <command> [timeout]
 ```
 
 **Happy path (has session):** returns `{ stdout, stderr, exitCode }` immediately.
