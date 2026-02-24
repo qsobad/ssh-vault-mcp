@@ -118,13 +118,7 @@
         <p><span class="spinner"></span> <span id="execStatusText">Executing...</span></p>
       </div>
 
-      <div class="result-box" id="resultBox">
-        <div class="result-header">
-          <strong>Result</strong>
-          <span class="exit-code" id="exitCodeBadge"></span>
-        </div>
-        <div class="result-output" id="resultOutput"></div>
-      </div>
+      <div class="result-box" id="resultBox"></div>
     </div>
 
     <div id="statusMsg" class="status" style="display: none;"></div>
@@ -288,27 +282,12 @@
 
     function showResult(data) {
       document.getElementById('executingStatus').style.display = 'none';
-      const resultBox = document.getElementById('resultBox');
-      const badge = document.getElementById('exitCodeBadge');
-      const output = document.getElementById('resultOutput');
-
-      resultBox.style.display = 'block';
-      const exitCode = data.exitCode ?? -1;
-      badge.textContent = `exit ${exitCode}`;
-      badge.className = `exit-code ${exitCode === 0 ? 'ok' : 'fail'}`;
-
-      let text = '';
-      if (data.stdout) text += data.stdout;
-      if (data.stderr) text += (text ? '\n' : '') + data.stderr;
-      if (!text) text = '(no output)';
-      output.textContent = text;
-
-      if (data.status === 'completed' && exitCode === 0) {
-        showStatus('✅ Command executed successfully', 'success');
+      if (data.status === 'completed') {
+        showStatus('✅ Approved. Result sent to agent.', 'success');
       } else if (data.status === 'failed') {
         showStatus('❌ ' + (data.error || 'Execution failed'), 'error');
       } else {
-        showStatus(`Command exited with code ${exitCode}`, 'warning');
+        showStatus('⚠️ Command finished. Result sent to agent.', 'warning');
       }
     }
 
