@@ -76,6 +76,25 @@
         <div class="value" id="agentConnection"></div>
       </div>
 
+      <!-- Credential input (shown when agent didn't provide one, or user wants to override) -->
+      <div id="credentialSection" style="display: none;">
+        <div class="form-group">
+          <label id="credentialLabel">Auth Type</label>
+          <select id="authTypeSelect" style="width:100%;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px;">
+            <option value="password">Password</option>
+            <option value="key">Private Key</option>
+          </select>
+        </div>
+        <div class="form-group" id="passwordCredGroup">
+          <label>Password</label>
+          <input type="password" id="credentialPassword" placeholder="SSH password">
+        </div>
+        <div class="form-group" id="keyCredGroup" style="display:none;">
+          <label>Private Key</label>
+          <textarea id="credentialKey" placeholder="Paste private key here" style="width:100%;height:120px;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:monospace;resize:vertical;"></textarea>
+        </div>
+      </div>
+
       <!-- Step 1: Authenticate -->
       <div id="authSection">
         <div class="form-group">
@@ -137,6 +156,21 @@
         document.getElementById('loading').style.display = 'none';
         document.getElementById('agentDetails').style.display = 'block';
         document.getElementById('authSection').style.display = 'block';
+
+        // Show credential input if agent didn't provide one
+        if (!data.hasCredential) {
+          document.getElementById('credentialSection').style.display = 'block';
+          document.getElementById('credentialLabel').textContent = 'Credential Required — agent did not provide one';
+          // Set default auth type from agent request
+          if (data.authType) document.getElementById('authTypeSelect').value = data.authType;
+        }
+
+        // Toggle password/key fields
+        document.getElementById('authTypeSelect').addEventListener('change', function() {
+          const isKey = this.value === 'key';
+          document.getElementById('passwordCredGroup').style.display = isKey ? 'none' : 'block';
+          document.getElementById('keyCredGroup').style.display = isKey ? 'block' : 'none';
+        });
       } catch (err) {
         showStatus('Failed to load registration', 'error');
         document.getElementById('loading').style.display = 'none';
@@ -201,13 +235,27 @@
         }
 
         // Step 4: Approve the agent registration
+        // Collect credential from user if provided
+        const approveBody = { allowedHosts: ['*'] };
+        const credSection = document.getElementById('credentialSection');
+        if (credSection.style.display !== 'none') {
+          const authType = document.getElementById('authTypeSelect').value;
+          const cred = authType === 'key'
+            ? document.getElementById('credentialKey').value.trim()
+            : document.getElementById('credentialPassword').value;
+          if (cred) {
+            approveBody.credential = cred;
+            approveBody.authType = authType;
+          }
+        }
+
         const approveRes = await fetch(`/api/agent/request-host/${registrationId}/approve`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${authData.token}`,
           },
-          body: JSON.stringify({ allowedHosts: ['*'] }),
+          body: JSON.stringify(approveBody),
         });
         const approveData = await approveRes.json();
 

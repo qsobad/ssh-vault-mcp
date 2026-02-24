@@ -11,6 +11,8 @@ import { VaultManager } from '../vault/vault.js';
 import { WebAuthnManager } from '../auth/webauthn.js';
 import { verifySignedRequest } from '../auth/agent.js';
 import { PolicyEngine } from '../policy/engine.js';
+import { SSHExecutor } from '../ssh/executor.js';
+import { SSHProxy } from '../ssh/proxy.js';
 
 // --- Rate Limiting ---
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -44,11 +46,34 @@ export class WebServer {
   private vaultManager: VaultManager;
   private webauthn: WebAuthnManager;
   private policyEngine: PolicyEngine;
+  private sshExecutor: SSHExecutor;
+  private sshProxy: SSHProxy;
 
   constructor(config: Config, vaultManager: VaultManager) {
     this.config = config;
     this.vaultManager = vaultManager;
     this.policyEngine = new PolicyEngine();
+    this.sshExecutor = new SSHExecutor();
+    this.sshProxy = new SSHProxy(
+      async (hostName: string) => {
+        await this.vaultManager.reloadVault();
+        const host = this.vaultManager.getHost(hostName);
+        if (!host) return null;
+        const credential = await this.vaultManager.decryptHostCredential(hostName);
+        return {
+          hostname: host.hostname,
+          port: host.port || 22,
+          username: host.username,
+          credential,
+          authType: (host.authType || (credential.includes('PRIVATE KEY') ? 'key' : 'password')) as 'key' | 'password',
+        };
+      },
+      (_fingerprint, sessionId, targetHost) => {
+        const session = this.vaultManager.getSession(sessionId);
+        if (!session) return false;
+        return session.approvedHosts.includes('*') || session.approvedHosts.includes(targetHost);
+      },
+    );
     this.webauthn = new WebAuthnManager({
       rpId: config.webauthn.rpId,
       rpName: config.webauthn.rpName,
@@ -65,7 +90,7 @@ export class WebServer {
       origin: this.config.webauthn.origin,
       credentials: true,
     }));
-    this.app.use(express.json());
+    this.app.use(express.json({ limit: '50mb' }));
     
     // Serve static files from web directory
     const webDir = path.join(__dirname, '../../web');
@@ -377,6 +402,247 @@ export class WebServer {
           error: 'Command execution failed: ' + (error instanceof Error ? error.message : String(error))
         });
       }
+    });
+
+    // SFTP file upload
+    this.app.post('/api/vault/upload', async (req: Request, res: Response) => {
+      const { host, remotePath, content, sessionId, signature, publicKey, timestamp, nonce } = req.body;
+
+      if (!host || !remotePath || !content) {
+        res.status(400).json({ error: 'host, remotePath, and content (base64) required' });
+        return;
+      }
+
+      if (!signature || !publicKey || !timestamp || !nonce) {
+        res.status(401).json({ error: 'Agent signature required' });
+        return;
+      }
+
+      const verification = verifySignedRequest({
+        payload: JSON.stringify({ host, remotePath }),
+        signature, publicKey, timestamp, nonce,
+      });
+
+      if (!verification.valid) {
+        res.status(401).json({ error: `Signature verification failed: ${verification.error}` });
+        return;
+      }
+
+      if (!sessionId) {
+        res.status(400).json({ error: 'sessionId required' });
+        return;
+      }
+
+      const session = this.vaultManager.getSession(sessionId);
+      if (!session || !session.approvedHosts.includes('*') && !session.approvedHosts.includes(host)) {
+        res.status(403).json({ error: 'No access to this host' });
+        return;
+      }
+
+      try {
+        await this.vaultManager.reloadVault();
+        const hostConfig = this.vaultManager.getHost(host);
+        if (!hostConfig) { res.status(404).json({ error: `Host "${host}" not found` }); return; }
+
+        const credential = await this.vaultManager.decryptHostCredential(host);
+        const hostForSftp = { ...hostConfig, credential, authType: hostConfig.authType || (credential.includes('PRIVATE KEY') ? 'key' : 'password') };
+
+        const contentBuffer = Buffer.from(content, 'base64');
+        const MAX_UPLOAD_SIZE = 50 * 1024 * 1024; // 50MB
+        if (contentBuffer.length > MAX_UPLOAD_SIZE) {
+          res.status(413).json({ error: `File too large: ${(contentBuffer.length / 1024 / 1024).toFixed(1)}MB (max ${MAX_UPLOAD_SIZE / 1024 / 1024}MB)` });
+          return;
+        }
+        const result = await this.sshExecutor.upload(hostForSftp as any, remotePath, contentBuffer);
+        this.vaultManager.touchSession(sessionId);
+        res.json({ success: result.success, bytesTransferred: result.bytesTransferred, error: result.error });
+      } catch (error) {
+        res.status(500).json({ error: 'Upload failed: ' + (error instanceof Error ? error.message : String(error)) });
+      }
+    });
+
+    // SFTP file download
+    this.app.post('/api/vault/download', async (req: Request, res: Response) => {
+      const { host, remotePath, sessionId, signature, publicKey, timestamp, nonce } = req.body;
+
+      if (!host || !remotePath) {
+        res.status(400).json({ error: 'host and remotePath required' });
+        return;
+      }
+
+      if (!signature || !publicKey || !timestamp || !nonce) {
+        res.status(401).json({ error: 'Agent signature required' });
+        return;
+      }
+
+      const verification = verifySignedRequest({
+        payload: JSON.stringify({ host, remotePath }),
+        signature, publicKey, timestamp, nonce,
+      });
+
+      if (!verification.valid) {
+        res.status(401).json({ error: `Signature verification failed: ${verification.error}` });
+        return;
+      }
+
+      if (!sessionId) {
+        res.status(400).json({ error: 'sessionId required' });
+        return;
+      }
+
+      const session = this.vaultManager.getSession(sessionId);
+      if (!session || !session.approvedHosts.includes('*') && !session.approvedHosts.includes(host)) {
+        res.status(403).json({ error: 'No access to this host' });
+        return;
+      }
+
+      try {
+        await this.vaultManager.reloadVault();
+        const hostConfig = this.vaultManager.getHost(host);
+        if (!hostConfig) { res.status(404).json({ error: `Host "${host}" not found` }); return; }
+
+        const credential = await this.vaultManager.decryptHostCredential(host);
+        const hostForSftp = { ...hostConfig, credential, authType: hostConfig.authType || (credential.includes('PRIVATE KEY') ? 'key' : 'password') };
+
+        const result = await this.sshExecutor.download(hostForSftp as any, remotePath);
+        this.vaultManager.touchSession(sessionId);
+        if (result.success && result.content) {
+          res.json({ success: true, content: result.content.toString('base64'), size: result.size });
+        } else {
+          res.status(404).json({ success: false, error: result.error });
+        }
+      } catch (error) {
+        res.status(500).json({ error: 'Download failed: ' + (error instanceof Error ? error.message : String(error)) });
+      }
+    });
+
+    // SFTP list files
+    this.app.post('/api/vault/ls', async (req: Request, res: Response) => {
+      const { host, remotePath, sessionId, signature, publicKey, timestamp, nonce } = req.body;
+
+      if (!host || !remotePath) {
+        res.status(400).json({ error: 'host and remotePath required' });
+        return;
+      }
+
+      if (!signature || !publicKey || !timestamp || !nonce) {
+        res.status(401).json({ error: 'Agent signature required' });
+        return;
+      }
+
+      const verification = verifySignedRequest({
+        payload: JSON.stringify({ host, remotePath }),
+        signature, publicKey, timestamp, nonce,
+      });
+
+      if (!verification.valid) {
+        res.status(401).json({ error: `Signature verification failed: ${verification.error}` });
+        return;
+      }
+
+      if (!sessionId) {
+        res.status(400).json({ error: 'sessionId required' });
+        return;
+      }
+
+      const session = this.vaultManager.getSession(sessionId);
+      if (!session || !session.approvedHosts.includes('*') && !session.approvedHosts.includes(host)) {
+        res.status(403).json({ error: 'No access to this host' });
+        return;
+      }
+
+      try {
+        await this.vaultManager.reloadVault();
+        const hostConfig = this.vaultManager.getHost(host);
+        if (!hostConfig) { res.status(404).json({ error: `Host "${host}" not found` }); return; }
+
+        const credential = await this.vaultManager.decryptHostCredential(host);
+        const hostForSftp = { ...hostConfig, credential, authType: hostConfig.authType || (credential.includes('PRIVATE KEY') ? 'key' : 'password') };
+
+        const result = await this.sshExecutor.listFiles(hostForSftp as any, remotePath);
+        this.vaultManager.touchSession(sessionId);
+        res.json(result);
+      } catch (error) {
+        res.status(500).json({ error: 'List failed: ' + (error instanceof Error ? error.message : String(error)) });
+      }
+    });
+
+    // SSH Proxy tunnel - create
+    this.app.post('/api/vault/tunnel', async (req: Request, res: Response) => {
+      const { host, sessionId, signature, publicKey, timestamp, nonce } = req.body;
+
+      if (!host) { res.status(400).json({ error: 'host required' }); return; }
+      if (!signature || !publicKey || !timestamp || !nonce) {
+        res.status(401).json({ error: 'Agent signature required' }); return;
+      }
+
+      const verification = verifySignedRequest({
+        payload: JSON.stringify({ host, action: 'tunnel' }),
+        signature, publicKey, timestamp, nonce,
+      });
+
+      if (!verification.valid) {
+        res.status(401).json({ error: `Signature verification failed: ${verification.error}` }); return;
+      }
+
+      if (!sessionId) { res.status(400).json({ error: 'sessionId required' }); return; }
+
+      const session = this.vaultManager.getSession(sessionId);
+      if (!session || (!session.approvedHosts.includes('*') && !session.approvedHosts.includes(host))) {
+        res.status(403).json({ error: 'No access to this host' }); return;
+      }
+
+      try {
+        const { fingerprintFromPublicKey } = await import('../auth/agent.js');
+        const fingerprint = fingerprintFromPublicKey(publicKey);
+
+        const tunnel = await this.sshProxy.createTunnel({
+          agentFingerprint: fingerprint,
+          agentPublicKey: publicKey,
+          targetHost: host,
+          sessionId,
+        });
+
+        res.json({
+          success: true,
+          tunnelId: tunnel.id,
+          port: tunnel.port,
+          host: '127.0.0.1',
+          expiresAt: tunnel.expiresAt,
+          usage: {
+            ssh: `ssh -p ${tunnel.port} -i <agent_key> any_user@127.0.0.1`,
+            scp: `scp -P ${tunnel.port} -i <agent_key> file any_user@127.0.0.1:/path`,
+            sftp: `sftp -P ${tunnel.port} -i <agent_key> any_user@127.0.0.1`,
+          },
+        });
+      } catch (error) {
+        res.status(500).json({ error: 'Failed to create tunnel: ' + (error instanceof Error ? error.message : String(error)) });
+      }
+    });
+
+    // SSH Proxy tunnel - list
+    this.app.get('/api/vault/tunnels', (_req: Request, res: Response) => {
+      res.json({ tunnels: this.sshProxy.listTunnels() });
+    });
+
+    // SSH Proxy tunnel - close
+    this.app.delete('/api/vault/tunnel/:id', async (req: Request, res: Response) => {
+      const { signature, publicKey, timestamp, nonce } = req.body || {};
+      if (!signature || !publicKey || !timestamp || !nonce) {
+        res.status(401).json({ error: 'Agent signature required' }); return;
+      }
+
+      const verification = verifySignedRequest({
+        payload: JSON.stringify({ tunnelId: req.params.id, action: 'close_tunnel' }),
+        signature, publicKey, timestamp, nonce,
+      });
+
+      if (!verification.valid) {
+        res.status(401).json({ error: `Signature verification failed: ${verification.error}` }); return;
+      }
+
+      const closed = this.sshProxy.closeTunnel(req.params.id);
+      res.json({ success: closed });
     });
 
     // Get challenge info for signing page
@@ -894,15 +1160,15 @@ export class WebServer {
     this.app.post('/api/agent/request-host', (req: Request, res: Response) => {
       try {
         const { name, host, port, username, credential, authType } = req.body;
-        if (!name || !host || !username || !credential) {
-          res.status(400).json({ error: 'name, host, username, and credential required' });
+        if (!name || !host || !username) {
+          res.status(400).json({ error: 'name, host, and username required' });
           return;
         }
         const challengeId = crypto.randomUUID();
         const expiresAt = Date.now() + 5 * 60 * 1000; // 5 min
 
         pendingHostRequests.set(challengeId, {
-          name, host, port: port || 22, username, credential, authType: authType || 'password',
+          name, host, port: port || 22, username, credential: credential || '', authType: authType || 'password',
           expiresAt, status: 'pending',
         });
 
@@ -972,6 +1238,7 @@ export class WebServer {
       res.json({
         name: hr.name, host: hr.host, port: hr.port, username: hr.username,
         authType: hr.authType, status: hr.status, expiresAt: hr.expiresAt,
+        hasCredential: !!hr.credential,
         // credential NOT exposed
       });
     });
@@ -990,6 +1257,17 @@ export class WebServer {
         return;
       }
       try {
+        // User can provide/override credential and authType during approval
+        const userCredential = req.body.credential;
+        const userAuthType = req.body.authType;
+        const finalCredential = userCredential || hr.credential;
+        const finalAuthType = userAuthType || hr.authType;
+
+        if (!finalCredential) {
+          res.status(400).json({ error: 'Credential (password or key) is required. Agent did not provide one — please enter it.' });
+          return;
+        }
+
         const { VaultStorage } = await import('../vault/storage.js');
         const storage = new VaultStorage(this.config.vault.path, true);
         const vault = await storage.load(session.vek);
@@ -1002,8 +1280,8 @@ export class WebServer {
           host: hr.host,
           port: hr.port,
           username: hr.username,
-          credential: hr.credential,
-          authType: hr.authType as 'key' | 'password',
+          credential: finalCredential,
+          authType: finalAuthType as 'key' | 'password',
           tags: [] as string[],
           createdAt: Date.now(),
           updatedAt: Date.now(),
