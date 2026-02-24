@@ -18,7 +18,11 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 await _sodium.ready;
 const sodium = _sodium;
 
-const VAULT_URL = process.env.SSH_VAULT_URL || 'https://ssh.29cp.cn';
+const VAULT_URL = process.env.SSH_VAULT_URL;
+if (!VAULT_URL) {
+  console.error('Error: SSH_VAULT_URL env var required');
+  process.exit(1);
+}
 const SESSION_FILE = '/tmp/ssh-vault-session.json';
 
 // Agent keys — read from environment variables
