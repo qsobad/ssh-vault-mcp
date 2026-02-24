@@ -34,9 +34,37 @@ const DEFAULT_CONFIG: Config = {
   },
 };
 
+const DEFAULT_CONFIG_PATH = '/app/config/config.yml';
+
+const LOCALHOST_CONFIG = `server:
+  port: 3000
+  host: 0.0.0.0
+
+vault:
+  path: /app/data/vault.enc
+  backup: true
+
+webauthn:
+  rp_id: "localhost"
+  rp_name: "SSH Vault"
+  origin: "http://localhost:3001"
+
+web:
+  port: 3001
+  external_url: "http://localhost:3001"
+
+session:
+  mode: session
+  timeout_minutes: 15
+
+logging:
+  level: info
+`;
+
 export async function loadConfig(configPath?: string): Promise<Config> {
   const searchPaths = [
     configPath,
+    DEFAULT_CONFIG_PATH,
     './config.yml',
     './config.yaml',
     './ssh-vault.yml',
@@ -54,8 +82,17 @@ export async function loadConfig(configPath?: string): Promise<Config> {
     }
   }
 
-  // No config file found — try environment variables
-  return applyEnvOverrides(DEFAULT_CONFIG);
+  // No config file found — create default localhost config
+  try {
+    await fs.mkdir(path.dirname(DEFAULT_CONFIG_PATH), { recursive: true });
+    await fs.writeFile(DEFAULT_CONFIG_PATH, LOCALHOST_CONFIG, 'utf-8');
+    console.error(`No config found. Created default localhost config at ${DEFAULT_CONFIG_PATH}`);
+    const parsed = parseYaml(LOCALHOST_CONFIG);
+    return applyEnvOverrides(mergeConfig(DEFAULT_CONFIG, parsed));
+  } catch {
+    // Fall back to env-only config
+    return applyEnvOverrides(DEFAULT_CONFIG);
+  }
 }
 
 /**
