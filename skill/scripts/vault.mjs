@@ -24,7 +24,9 @@ const SESSION_FILE = '/tmp/ssh-vault-session.json';
 // Agent keys — read from environment variables
 const PRIVATE_KEY_B64 = process.env.SSH_VAULT_AGENT_PRIVATE_KEY;
 const PUBLIC_KEY_B64 = process.env.SSH_VAULT_AGENT_PUBLIC_KEY;
-const FINGERPRINT = process.env.SSH_VAULT_AGENT_FINGERPRINT || '';
+// Derive fingerprint from public key
+import crypto from 'crypto';
+const FINGERPRINT = 'SHA256:' + crypto.createHash('sha256').update(Buffer.from(PUBLIC_KEY_B64, 'base64')).digest('base64').replace(/=+$/, '');
 
 if (!PRIVATE_KEY_B64 || !PUBLIC_KEY_B64) {
   console.error('Error: SSH_VAULT_AGENT_PRIVATE_KEY and SSH_VAULT_AGENT_PUBLIC_KEY env vars required');

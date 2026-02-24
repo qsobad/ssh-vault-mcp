@@ -13,7 +13,7 @@ Required env vars:
 - `SSH_VAULT_URL` — vault URL
 - `SSH_VAULT_AGENT_PRIVATE_KEY` — agent Ed25519 private key (base64)
 - `SSH_VAULT_AGENT_PUBLIC_KEY` — agent Ed25519 public key (base64)
-- `SSH_VAULT_AGENT_FINGERPRINT` — agent fingerprint (optional)
+Fingerprint is auto-derived from public key.
 
 ## Docker Setup (user-managed)
 
