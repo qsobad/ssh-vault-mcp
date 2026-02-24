@@ -1,6 +1,6 @@
 ---
 name: ssh-vault
-description: "Execute SSH commands on remote hosts via SSH Vault MCP. Use when: user asks to run commands on vault-managed hosts, or when in a Discord channel mapped to a vault host. NOT for: hosts with direct SSH access or openclaw nodes. Ask user for their vault URL if not known."
+description: "Execute SSH commands on remote hosts via SSH Vault MCP. Use when: user asks to run commands on vault-managed hosts, or when in a Discord channel mapped to a vault host. NOT for: hosts with direct SSH access or openclaw nodes. Ask user for their vault URL if not known. Requires env vars: SSH_VAULT_URL (vault endpoint), SSH_VAULT_AGENT_PRIVATE_KEY and SSH_VAULT_AGENT_PUBLIC_KEY (Ed25519 agent keypair for request signing). The private key is used only for signing vault API requests — never reuse keys tied to other services."
 ---
 
 # SSH Vault
