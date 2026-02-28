@@ -4,7 +4,7 @@
  */
 
 import { randomUUID } from 'crypto';
-import type { Vault, Host, AgentConfig, Session, UnlockChallenge, PasskeyCredential, GlobalPolicy } from '../types.js';
+import type { Vault, Host, AgentConfig, Session, UnlockChallenge, PasskeyCredential, GlobalPolicy, Secret } from '../types.js';
 import { VaultStorage } from './storage.js';
 import { generateRandomId, generateUnlockCode, secureWipe, initSodium } from './encryption.js';
 
@@ -84,6 +84,7 @@ export class VaultManager {
     return {
       ...vault,
       hosts: vault.hosts.map(h => ({ ...h, credential: '[encrypted]' })),
+      secrets: (vault.secrets || []).map(s => ({ ...s, content: '[encrypted]' })),
     };
   }
 
@@ -746,6 +747,130 @@ export class VaultManager {
     await this.storage.save(fullVault, this.currentSignature);
     this.vault = this.stripCredentials(fullVault);
     return true;
+  }
+
+  // ─── Secret CRUD ───────────────────────────────────────────
+
+  /**
+   * Get all secrets (metadata only, content stripped)
+   */
+  getSecrets(): Secret[] {
+    if (!this.vault) throw new Error('Vault is locked');
+    return this.vault.secrets || [];
+  }
+
+  /**
+   * Get secret metadata by name or ID (content stripped)
+   */
+  getSecret(nameOrId: string): Secret | null {
+    if (!this.vault) throw new Error('Vault is locked');
+    return (this.vault.secrets || []).find(s => s.id === nameOrId || s.name === nameOrId) ?? null;
+  }
+
+  /**
+   * Decrypt a single secret's content on-demand
+   */
+  async decryptSecretContent(secretNameOrId: string): Promise<string> {
+    if (!this.currentSignature) throw new Error('Vault is locked');
+    this.resetAutoLockTimer();
+    const content = await this.storage.decryptSecretContent(secretNameOrId, this.currentSignature);
+    if (content === null) throw new Error(`Secret '${secretNameOrId}' not found`);
+    return content;
+  }
+
+  /**
+   * List secrets (name + tags only, no content)
+   */
+  listSecrets(): { id: string; name: string; tags: string[]; createdAt: number; updatedAt: number }[] {
+    if (!this.vault) throw new Error('Vault is locked');
+    return (this.vault.secrets || []).map(s => ({
+      id: s.id,
+      name: s.name,
+      tags: s.tags,
+      createdAt: s.createdAt,
+      updatedAt: s.updatedAt,
+    }));
+  }
+
+  /**
+   * Add a secret
+   */
+  async addSecret(secret: Omit<Secret, 'id' | 'createdAt' | 'updatedAt'>): Promise<Secret> {
+    if (!this.currentSignature) throw new Error('Vault is locked');
+    this.resetAutoLockTimer();
+    const fullVault = await this.storage.load(this.currentSignature);
+    if (!fullVault.secrets) fullVault.secrets = [];
+    const newSecret: Secret = {
+      ...secret,
+      id: randomUUID(),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    fullVault.secrets.push(newSecret);
+    await this.storage.save(fullVault, this.currentSignature);
+    this.vault = this.stripCredentials(fullVault);
+    return { ...newSecret, content: '[encrypted]' };
+  }
+
+  /**
+   * Update a secret
+   */
+  async updateSecret(id: string, updates: Partial<Pick<Secret, 'name' | 'tags' | 'content'>>): Promise<Secret | null> {
+    if (!this.currentSignature) throw new Error('Vault is locked');
+    this.resetAutoLockTimer();
+    const fullVault = await this.storage.load(this.currentSignature);
+    if (!fullVault.secrets) fullVault.secrets = [];
+    const secret = fullVault.secrets.find(s => s.id === id);
+    if (!secret) return null;
+    if (updates.name !== undefined) secret.name = updates.name;
+    if (updates.tags !== undefined) secret.tags = updates.tags;
+    if (updates.content !== undefined) secret.content = updates.content;
+    secret.updatedAt = Date.now();
+    await this.storage.save(fullVault, this.currentSignature);
+    this.vault = this.stripCredentials(fullVault);
+    return { ...secret, content: '[encrypted]' };
+  }
+
+  /**
+   * Delete a secret
+   */
+  async deleteSecret(id: string): Promise<boolean> {
+    if (!this.currentSignature) throw new Error('Vault is locked');
+    this.resetAutoLockTimer();
+    const fullVault = await this.storage.load(this.currentSignature);
+    if (!fullVault.secrets) fullVault.secrets = [];
+    const index = fullVault.secrets.findIndex(s => s.id === id);
+    if (index === -1) return false;
+    fullVault.secrets.splice(index, 1);
+    await this.storage.save(fullVault, this.currentSignature);
+    this.vault = this.stripCredentials(fullVault);
+    return true;
+  }
+
+  /**
+   * Parse SSH connection info from a secret's markdown content
+   */
+  static parseSSHFromSecret(content: string): {
+    host: string;
+    port: number;
+    user: string;
+    password?: string;
+    key?: string;
+  } | null {
+    const getField = (name: string): string | undefined => {
+      const match = content.match(new RegExp(`^\\s*-\\s*${name}:\\s*(.+)`, 'mi'));
+      return match?.[1]?.trim();
+    };
+    const host = getField('host');
+    const user = getField('user');
+    if (!host || !user) return null;
+    return {
+      host,
+      port: parseInt(getField('port') || '22', 10),
+      user,
+      password: getField('password'),
+      key: getField('key'),
+    };
   }
 
   /**

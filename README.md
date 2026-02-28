@@ -1,24 +1,27 @@
-# SSH Vault MCP
+# SSH Vault MCP (Secret Vault)
 
-A secure SSH credential vault with [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) interface. Human approves via Passkey, AI agent executes SSH commands.
+A secure secret vault with [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) interface. Store any secret as encrypted markdown — SSH credentials, API keys, certificates, notes. Human approves via Passkey, AI agent accesses secrets securely.
 
 ## Why?
 
-AI agents need SSH access to manage servers — but giving them raw credentials is dangerous. SSH Vault solves this:
+AI agents need access to secrets (SSH keys, API tokens, passwords) — but giving them raw credentials is dangerous. Secret Vault solves this:
 
-- **Agent never sees passwords or keys** — the vault authenticates on its behalf
-- **You approve every action** — via Passkey on your phone, in real-time
-- **Shell metacharacters allowed** — `&&`, `;`, `|`, `$()`, backticks all work — agent is trusted after Passkey approval
+- **Agent requests secrets by name** — never browses raw credential stores
+- **You approve every access** — via Passkey on your phone, in real-time
+- **Flexible storage** — any secret stored as markdown (SSH hosts, API keys, notes)
+- **SSH built-in** — secrets tagged `ssh` can be used directly for remote execution
 - **Works with any MCP-compatible AI** — Claude, GPT, or your own agent
 
 ## Features
 
 - 🔐 **Passkey + Master Password** — dual-factor vault access
-- 🔒 **End-to-end encryption** — credentials never stored in plaintext
+- 🔒 **End-to-end encryption** — secrets never stored in plaintext (Argon2id + XSalsa20-Poly1305)
 - 🤖 **MCP compatible** — works with Claude Desktop, Cursor, OpenClaw, and any MCP client
-- ⚡ **One-step approval** — agent sends command → you tap Passkey → command runs → result returns to agent
-- 🔑 **Session reuse** — after first approval, subsequent commands don't need re-approval
+- 📝 **Markdown secrets** — store any secret as structured markdown
+- ⚡ **One-step approval** — agent requests secret → you tap Passkey → secret delivered
+- 🔑 **Session reuse** — after first approval, subsequent requests don't need re-approval
 - ⏱️ **Auto-lock** — vault locks after inactivity, keys wiped from memory
+- 🖥️ **SSH execution** — secrets with SSH info can be used to execute remote commands
 
 ## Quick Start
 

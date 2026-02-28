@@ -299,20 +299,45 @@
 
   <div class="container">
     <header>
-      <h1>🔐 SSH Vault <span class="status-badge status-unlocked" id="statusBadge">Unlocked</span></h1>
+      <h1>🔐 Secret Vault <span class="status-badge status-unlocked" id="statusBadge">Unlocked</span></h1>
       <button class="btn btn-danger" onclick="lockVault()">Lock Vault</button>
     </header>
 
     <div class="tabs">
-      <div class="tab active" onclick="showTab('hosts')">🖥️ Hosts</div>
+      <div class="tab active" onclick="showTab('secrets')">🔒 Secrets</div>
+      <div class="tab" onclick="showTab('hosts')">🖥️ Hosts</div>
       <div class="tab" onclick="showTab('agents')">🤖 Agents</div>
       <div class="tab" onclick="showTab('sessions')">🔑 Sessions</div>
       <div class="tab" onclick="showTab('passkeys')">🔐 Passkeys</div>
       <div class="tab" onclick="showTab('policy')">⚙️ Policy</div>
     </div>
 
-    <!-- Hosts Tab -->
-    <div id="hosts-tab" class="tab-content">
+    <!-- Secrets Tab -->
+    <div id="secrets-tab" class="tab-content">
+      <div class="card">
+        <div class="card-header">
+          <h2>Secrets</h2>
+          <button class="btn btn-primary" onclick="showAddSecretModal()">+ Add Secret</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Tags</th>
+              <th>Updated</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="secretsTable"></tbody>
+        </table>
+        <div class="empty-state" id="secretsEmpty" style="display: none;">
+          No secrets stored. Add your first secret.
+        </div>
+      </div>
+    </div>
+
+    <!-- Hosts Tab (Legacy) -->
+    <div id="hosts-tab" class="tab-content" style="display: none;">
       <div class="card">
         <div class="card-header">
           <h2>SSH Hosts</h2>
@@ -813,6 +838,7 @@
         });
         if (res.ok) {
           vaultData = await res.json();
+          renderSecrets();
           renderHosts();
           renderAgents();
           renderSessions();
@@ -820,6 +846,129 @@
         }
       } catch (e) {
         console.error('Failed to load vault data:', e);
+      }
+    }
+
+    function renderSecrets() {
+      const tbody = document.getElementById('secretsTable');
+      const empty = document.getElementById('secretsEmpty');
+      const secrets = vaultData.secrets || [];
+      
+      if (secrets.length === 0) {
+        tbody.innerHTML = '';
+        empty.style.display = 'block';
+        return;
+      }
+      
+      empty.style.display = 'none';
+      tbody.innerHTML = secrets.map(s => `
+        <tr>
+          <td><strong>${escapeHtml(s.name)}</strong></td>
+          <td>${(s.tags || []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</td>
+          <td>${new Date(s.updatedAt).toLocaleString()}</td>
+          <td>
+            <button class="btn btn-sm" data-secret-id="${escapeHtml(s.id)}" onclick="editSecret(this.dataset.secretId)">Edit</button>
+            <button class="btn btn-sm btn-danger" data-secret-id="${escapeHtml(s.id)}" onclick="deleteSecret(this.dataset.secretId)">Delete</button>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    async function showAddSecretModal() {
+      const name = prompt('Secret name:');
+      if (!name) return;
+      const tags = prompt('Tags (comma-separated):', '') || '';
+      const content = prompt('Content (markdown):', `# ${name}\n`) || '';
+      
+      try {
+        const res = await fetch('/api/manage/secrets', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${manageToken}` },
+          body: JSON.stringify({ name, tags: tags.split(',').map(t => t.trim()).filter(Boolean), content }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          await loadVaultData();
+          renderSecrets();
+        } else {
+          alert(data.error);
+        }
+      } catch (e) {
+        alert('Failed to add secret');
+      }
+    }
+
+    async function editSecret(id) {
+      // Load content first
+      try {
+        const res = await fetch(`/api/manage/secrets/${id}/content`, {
+          headers: { 'Authorization': `Bearer ${manageToken}` },
+        });
+        const data = await res.json();
+        const secret = (vaultData.secrets || []).find(s => s.id === id);
+        if (!secret) return;
+
+        const name = prompt('Name:', secret.name);
+        if (name === null) return;
+        const tags = prompt('Tags (comma-separated):', (secret.tags || []).join(', '));
+        if (tags === null) return;
+        const content = prompt('Content (markdown):', data.content);
+        if (content === null) return;
+
+        const updateRes = await fetch(`/api/manage/secrets/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${manageToken}` },
+          body: JSON.stringify({ name, tags: tags.split(',').map(t => t.trim()).filter(Boolean), content }),
+        });
+        const updateData = await updateRes.json();
+        if (updateData.success) {
+          await loadVaultData();
+          renderSecrets();
+        } else {
+          alert(updateData.error);
+        }
+      } catch (e) {
+        alert('Failed to edit secret');
+      }
+    }
+
+    async function deleteSecret(id) {
+      if (!confirm('Delete this secret?')) return;
+      try {
+        const optRes = await fetch('/api/auth/options', { method: 'POST' });
+        const optData = await optRes.json();
+        optData.options.challenge = base64urlToBuffer(optData.options.challenge);
+        if (optData.options.allowCredentials) {
+          optData.options.allowCredentials = optData.options.allowCredentials.map(c => ({
+            ...c, id: base64urlToBuffer(c.id)
+          }));
+        }
+        const assertion = await navigator.credentials.get({ publicKey: optData.options });
+        const webauthnResponse = {
+          id: assertion.id,
+          rawId: bufferToBase64url(assertion.rawId),
+          type: assertion.type,
+          response: {
+            authenticatorData: bufferToBase64url(assertion.response.authenticatorData),
+            clientDataJSON: bufferToBase64url(assertion.response.clientDataJSON),
+            signature: bufferToBase64url(assertion.response.signature),
+          }
+        };
+
+        const res = await fetch(`/api/manage/secrets/${id}`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${manageToken}` },
+          body: JSON.stringify({ challengeId: optData.challengeId, webauthnResponse }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          await loadVaultData();
+          renderSecrets();
+        } else {
+          alert(data.error);
+        }
+      } catch (e) {
+        alert('Failed to delete secret');
       }
     }
 

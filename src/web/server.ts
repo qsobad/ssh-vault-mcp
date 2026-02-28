@@ -57,6 +57,22 @@ export class WebServer {
     this.sshProxy = new SSHProxy(
       async (hostName: string) => {
         await this.vaultManager.reloadVault();
+        // Try secrets first, then legacy hosts
+        const secret = this.vaultManager.getSecret(hostName);
+        if (secret) {
+          const content = await this.vaultManager.decryptSecretContent(hostName);
+          const sshInfo = VaultManager.parseSSHFromSecret(content);
+          if (!sshInfo) return null;
+          const credential = sshInfo.key || sshInfo.password || '';
+          return {
+            hostname: sshInfo.host,
+            port: sshInfo.port,
+            username: sshInfo.user,
+            credential,
+            authType: (sshInfo.key ? 'key' : 'password') as 'key' | 'password',
+          };
+        }
+        // Legacy host fallback
         const host = this.vaultManager.getHost(hostName);
         if (!host) return null;
         const credential = await this.vaultManager.decryptHostCredential(hostName);
@@ -83,6 +99,45 @@ export class WebServer {
     this.app = express();
     this.setupMiddleware();
     this.setupRoutes();
+  }
+
+  /**
+   * Resolve SSH connection info from secrets or legacy hosts
+   */
+  private async resolveSSHHost(hostName: string): Promise<{
+    hostname: string;
+    port: number;
+    username: string;
+    credential: string;
+    authType: 'key' | 'password';
+  } | null> {
+    await this.vaultManager.reloadVault();
+    // Try secrets first
+    const secret = this.vaultManager.getSecret(hostName);
+    if (secret) {
+      const content = await this.vaultManager.decryptSecretContent(hostName);
+      const sshInfo = VaultManager.parseSSHFromSecret(content);
+      if (!sshInfo) return null;
+      const credential = sshInfo.key || sshInfo.password || '';
+      return {
+        hostname: sshInfo.host,
+        port: sshInfo.port,
+        username: sshInfo.user,
+        credential,
+        authType: sshInfo.key ? 'key' : 'password',
+      };
+    }
+    // Legacy host fallback
+    const host = this.vaultManager.getHost(hostName);
+    if (!host) return null;
+    const credential = await this.vaultManager.decryptHostCredential(hostName);
+    return {
+      hostname: host.hostname,
+      port: host.port || 22,
+      username: host.username,
+      credential,
+      authType: (host.authType || (credential.includes('PRIVATE KEY') ? 'key' : 'password')) as 'key' | 'password',
+    };
   }
 
   private setupMiddleware(): void {
@@ -317,21 +372,49 @@ export class WebServer {
         // Reload vault to get latest config (credentials stripped)
         await this.vaultManager.reloadVault();
         
-        // Get host config from vault (credential will be '[encrypted]')
-        const hostConfig = this.vaultManager.getHost(host);
-        if (!hostConfig) {
-          res.status(404).json({ error: `Host '${host}' not found` });
-          return;
-        }
-
-        // Decrypt credential on-demand
+        // Try secrets first, then legacy hosts
         const { secureWipe: wipe } = await import('../vault/encryption.js');
+        let connectHostname: string;
+        let connectPort: number;
+        let connectUsername: string;
         let credential: string;
-        try {
-          credential = await this.vaultManager.decryptHostCredential(host);
-        } catch (err) {
-          res.status(500).json({ error: 'Failed to decrypt credential: ' + (err instanceof Error ? err.message : String(err)) });
-          return;
+        let authType: string;
+
+        const secret = this.vaultManager.getSecret(host);
+        if (secret) {
+          try {
+            const content = await this.vaultManager.decryptSecretContent(host);
+            const sshInfo = VaultManager.parseSSHFromSecret(content);
+            if (!sshInfo) {
+              res.status(400).json({ error: `Secret '${host}' does not contain SSH connection info` });
+              return;
+            }
+            connectHostname = sshInfo.host;
+            connectPort = sshInfo.port;
+            connectUsername = sshInfo.user;
+            credential = sshInfo.key || sshInfo.password || '';
+            authType = sshInfo.key ? 'key' : 'password';
+          } catch (err) {
+            res.status(500).json({ error: 'Failed to decrypt secret: ' + (err instanceof Error ? err.message : String(err)) });
+            return;
+          }
+        } else {
+          // Legacy host fallback
+          const hostConfig = this.vaultManager.getHost(host);
+          if (!hostConfig) {
+            res.status(404).json({ error: `Host/secret '${host}' not found` });
+            return;
+          }
+          try {
+            credential = await this.vaultManager.decryptHostCredential(host);
+          } catch (err) {
+            res.status(500).json({ error: 'Failed to decrypt credential: ' + (err instanceof Error ? err.message : String(err)) });
+            return;
+          }
+          connectHostname = hostConfig.hostname;
+          connectPort = hostConfig.port || 22;
+          connectUsername = hostConfig.username;
+          authType = hostConfig.authType || (credential.includes('PRIVATE KEY') ? 'key' : 'password');
         }
 
         // Execute SSH command
@@ -363,13 +446,13 @@ export class WebServer {
             ssh.on('error', reject);
 
             const connectConfig: any = {
-              host: hostConfig.hostname,
-              port: hostConfig.port || 22,
-              username: hostConfig.username,
+              host: connectHostname,
+              port: connectPort,
+              username: connectUsername,
             };
 
-            console.log('[execute] authType:', hostConfig.authType);
-            if (hostConfig.authType === 'key' || credential.includes('PRIVATE KEY')) {
+            console.log('[execute] authType:', authType);
+            if (authType === 'key' || credential.includes('PRIVATE KEY')) {
               connectConfig.privateKey = credential;
               console.log('[execute] Using SSH key auth');
             } else if (credential) {
@@ -451,12 +534,9 @@ export class WebServer {
       }
 
       try {
-        await this.vaultManager.reloadVault();
-        const hostConfig = this.vaultManager.getHost(host);
-        if (!hostConfig) { res.status(404).json({ error: `Host "${host}" not found` }); return; }
-
-        const credential = await this.vaultManager.decryptHostCredential(host);
-        const hostForSftp = { ...hostConfig, credential, authType: hostConfig.authType || (credential.includes('PRIVATE KEY') ? 'key' : 'password') };
+        const resolved = await this.resolveSSHHost(host);
+        if (!resolved) { res.status(404).json({ error: `Host/secret "${host}" not found` }); return; }
+        const hostForSftp = { ...resolved, name: host, id: host };
 
         const contentBuffer = Buffer.from(content, 'base64');
         const MAX_UPLOAD_SIZE = 50 * 1024 * 1024; // 50MB
@@ -508,12 +588,9 @@ export class WebServer {
       }
 
       try {
-        await this.vaultManager.reloadVault();
-        const hostConfig = this.vaultManager.getHost(host);
-        if (!hostConfig) { res.status(404).json({ error: `Host "${host}" not found` }); return; }
-
-        const credential = await this.vaultManager.decryptHostCredential(host);
-        const hostForSftp = { ...hostConfig, credential, authType: hostConfig.authType || (credential.includes('PRIVATE KEY') ? 'key' : 'password') };
+        const resolved = await this.resolveSSHHost(host);
+        if (!resolved) { res.status(404).json({ error: `Host/secret "${host}" not found` }); return; }
+        const hostForSftp = { ...resolved, name: host, id: host };
 
         const result = await this.sshExecutor.download(hostForSftp as any, remotePath);
         this.vaultManager.touchSession(sessionId);
@@ -563,12 +640,9 @@ export class WebServer {
       }
 
       try {
-        await this.vaultManager.reloadVault();
-        const hostConfig = this.vaultManager.getHost(host);
-        if (!hostConfig) { res.status(404).json({ error: `Host "${host}" not found` }); return; }
-
-        const credential = await this.vaultManager.decryptHostCredential(host);
-        const hostForSftp = { ...hostConfig, credential, authType: hostConfig.authType || (credential.includes('PRIVATE KEY') ? 'key' : 'password') };
+        const resolved = await this.resolveSSHHost(host);
+        if (!resolved) { res.status(404).json({ error: `Host/secret "${host}" not found` }); return; }
+        const hostForSftp = { ...resolved, name: host, id: host };
 
         const result = await this.sshExecutor.listFiles(hostForSftp as any, remotePath);
         this.vaultManager.touchSession(sessionId);
@@ -1536,26 +1610,16 @@ export class WebServer {
         emitStatus({ status: 'executing' });
 
         try {
-          await this.vaultManager.reloadVault();
-          const hostConfig = this.vaultManager.getHost(er.host);
-          if (!hostConfig) {
+          const resolved = await this.resolveSSHHost(er.host);
+          if (!resolved) {
             er.status = 'failed';
-            er.error = `Host '${er.host}' not found`;
+            er.error = `Host/secret '${er.host}' not found`;
             emitStatus({ status: 'failed', error: er.error });
             res.json({ status: 'failed', error: er.error, sessionId: session.id });
             return;
           }
 
-          let credential: string;
-          try {
-            credential = await this.vaultManager.decryptHostCredential(er.host);
-          } catch (err) {
-            er.status = 'failed';
-            er.error = 'Failed to decrypt credential';
-            emitStatus({ status: 'failed', error: er.error });
-            res.json({ status: 'failed', error: er.error, sessionId: session.id });
-            return;
-          }
+          const credential = resolved.credential;
 
           const { Client: SSHClient } = await import('ssh2');
           const ssh = new SSHClient();
@@ -1575,12 +1639,12 @@ export class WebServer {
             ssh.on('error', reject);
 
             const connectConfig: any = {
-              host: hostConfig.hostname,
-              port: hostConfig.port || 22,
-              username: hostConfig.username,
+              host: resolved.hostname,
+              port: resolved.port,
+              username: resolved.username,
               readyTimeout: execTimeout * 1000,
             };
-            if (hostConfig.authType === 'key' || credential.includes('PRIVATE KEY')) {
+            if (resolved.authType === 'key' || credential.includes('PRIVATE KEY')) {
               connectConfig.privateKey = credential;
             } else {
               connectConfig.password = credential;
@@ -1637,6 +1701,529 @@ export class WebServer {
     });
 
     // Serve exec approval page
+    // ─── Secret API endpoints ─────────────────────────────────
+
+    // Pending secret requests (for approval flow)
+    const pendingSecretRequests = new Map<string, {
+      name: string;
+      agentFingerprint: string;
+      status: 'pending' | 'approved' | 'rejected';
+      expiresAt: number;
+      sessionId?: string;
+      listeners: Set<(event: any) => void>;
+    }>();
+
+    // Pending secret creation requests
+    const pendingSecretCreations = new Map<string, {
+      name: string;
+      tags: string[];
+      agentFingerprint: string;
+      status: 'pending' | 'approved' | 'rejected';
+      expiresAt: number;
+      listeners: Set<(event: any) => void>;
+    }>();
+
+    // POST /api/secrets/request — agent requests a secret's content
+    this.app.post('/api/secrets/request', async (req: Request, res: Response) => {
+      try {
+        const verified = await verifySignedRequest(req.body);
+        if (!verified.valid) {
+          res.status(401).json({ error: verified.error });
+          return;
+        }
+
+        const { name } = req.body;
+        if (!name) {
+          res.status(400).json({ error: 'Secret name required' });
+          return;
+        }
+
+        if (!this.vaultManager.isUnlocked()) {
+          res.status(423).json({ error: 'Vault is locked' });
+          return;
+        }
+
+        const secret = this.vaultManager.getSecret(name);
+        if (!secret) {
+          res.status(404).json({ error: `Secret '${name}' not found` });
+          return;
+        }
+
+        // Check if agent has active session
+        const session = this.vaultManager.getSessionByAgent(verified.fingerprint!);
+        if (session) {
+          // Has session — return content directly
+          const content = await this.vaultManager.decryptSecretContent(name);
+          this.vaultManager.touchSession(session.id);
+          res.json({ content, sessionId: session.id });
+          return;
+        }
+
+        // No session — needs approval
+        const requestId = crypto.randomUUID();
+        const baseUrl = this.config.web.externalUrl;
+        pendingSecretRequests.set(requestId, {
+          name,
+          agentFingerprint: verified.fingerprint!,
+          status: 'pending',
+          expiresAt: Date.now() + 5 * 60 * 1000,
+          listeners: new Set(),
+        });
+
+        res.json({
+          needsApproval: true,
+          approvalUrl: `${baseUrl}/approve-secret?id=${requestId}`,
+          listenUrl: `${baseUrl}/api/secrets/request/${requestId}/listen`,
+          requestId,
+          expiresAt: Date.now() + 5 * 60 * 1000,
+        });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' });
+      }
+    });
+
+    // GET /api/secrets/request/:id — get request info
+    this.app.get('/api/secrets/request/:id', (req: Request, res: Response) => {
+      const sr = pendingSecretRequests.get(req.params.id);
+      if (!sr || sr.expiresAt < Date.now()) {
+        res.status(404).json({ error: 'Request not found or expired' });
+        return;
+      }
+      res.json({ name: sr.name, status: sr.status, expiresAt: sr.expiresAt });
+    });
+
+    // GET /api/secrets/request/:id/listen — SSE for secret request approval
+    this.app.get('/api/secrets/request/:id/listen', (req: Request, res: Response) => {
+      const sr = pendingSecretRequests.get(req.params.id);
+      if (!sr || sr.expiresAt < Date.now()) {
+        res.status(404).json({ error: 'Request not found or expired' });
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      });
+      res.write('data: {"status":"connected"}\n\n');
+
+      if (sr.status === 'approved' && sr.sessionId) {
+        res.write(`data: ${JSON.stringify({ status: 'approved', sessionId: sr.sessionId })}\n\n`);
+        res.end();
+        return;
+      }
+
+      const listener = (event: any) => {
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+        if (event.status === 'approved' || event.status === 'rejected') {
+          res.end();
+        }
+      };
+      sr.listeners.add(listener);
+      req.on('close', () => sr.listeners.delete(listener));
+    });
+
+    // POST /api/secrets/request/:id/approve — approve secret access (requires passkey+password)
+    this.app.post('/api/secrets/request/:id/approve', async (req: Request, res: Response) => {
+      if (!checkRateLimit(req.ip || 'unknown')) {
+        res.status(429).json({ error: 'Too many attempts' });
+        return;
+      }
+      const sr = pendingSecretRequests.get(req.params.id);
+      if (!sr || sr.expiresAt < Date.now()) {
+        res.status(404).json({ error: 'Request not found or expired' });
+        return;
+      }
+
+      try {
+        const { challengeId, response, password } = req.body;
+        if (!password || !challengeId || !response) {
+          res.status(400).json({ error: 'Passkey + password required' });
+          return;
+        }
+
+        // Verify WebAuthn
+        const metadata = await this.vaultManager.getMetadata();
+        if (!metadata) { res.status(404).json({ error: 'No vault' }); return; }
+        let verified = false;
+        for (const cred of metadata.credentials) {
+          const result = await this.webauthn.verifyAuthentication(challengeId, response, {
+            id: cred.id, publicKey: cred.publicKey, algorithm: cred.algorithm, counter: 0, createdAt: 0,
+          });
+          if (result.success) { verified = true; break; }
+        }
+        if (!verified) { res.status(401).json({ error: 'Passkey verification failed' }); return; }
+
+        // Verify password → derive VEK
+        const authMeta = await this.vaultManager.getAuthMetadata();
+        if (!authMeta) { res.status(404).json({ error: 'No vault' }); return; }
+        const { deriveKeyFromPassword, fromBase64, secureWipe } = await import('../vault/encryption.js');
+        const passwordSalt = fromBase64(authMeta.passwordSalt);
+        const vek = deriveKeyFromPassword(password, passwordSalt, authMeta.kdfParams);
+
+        // Verify VEK
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, false);
+        try { await storage.load(vek); } catch { res.status(401).json({ error: 'Invalid password' }); return; }
+
+        // Unlock vault if needed, get/create session
+        const content = await this.vaultManager.decryptSecretContent(sr.name);
+        
+        // Create session for the agent
+        // Use internal unlock if not already unlocked
+        let session = this.vaultManager.getSessionByAgent(sr.agentFingerprint);
+        if (!session) {
+          // Create unlock challenge and auto-complete it
+          const challengeResult = this.vaultManager.createUnlockChallenge(
+            this.config.web.externalUrl, sr.agentFingerprint
+          );
+          await this.vaultManager.completeChallenge(challengeResult.challengeId, vek, true);
+          session = this.vaultManager.getSessionByAgent(sr.agentFingerprint);
+        }
+
+        sr.status = 'approved';
+        sr.sessionId = session?.id;
+
+        // Notify listeners with content + sessionId
+        for (const listener of sr.listeners) {
+          try { listener({ status: 'approved', content, sessionId: session?.id }); } catch {}
+        }
+
+        secureWipe(vek);
+        res.json({ success: true, sessionId: session?.id });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' });
+      }
+    });
+
+    // POST /api/secrets/request/:id/reject
+    this.app.post('/api/secrets/request/:id/reject', (req: Request, res: Response) => {
+      const sr = pendingSecretRequests.get(req.params.id);
+      if (!sr) { res.status(404).json({ error: 'Not found' }); return; }
+      sr.status = 'rejected';
+      for (const listener of sr.listeners) {
+        try { listener({ status: 'rejected' }); } catch {}
+      }
+      res.json({ success: true });
+    });
+
+    // GET /api/secrets/list — list secrets (name + tags), requires signature + session
+    this.app.get('/api/secrets/list', async (req: Request, res: Response) => {
+      try {
+        // Accept signature params from query for GET request
+        const params = {
+          payload: 'list_secrets',
+          signature: req.query.signature as string,
+          publicKey: req.query.publicKey as string,
+          timestamp: parseInt(req.query.timestamp as string, 10),
+          nonce: req.query.nonce as string,
+        };
+        const verified = await verifySignedRequest(params);
+        if (!verified.valid) {
+          res.status(401).json({ error: verified.error });
+          return;
+        }
+
+        if (!this.vaultManager.isUnlocked()) {
+          res.status(423).json({ error: 'Vault is locked' });
+          return;
+        }
+
+        const session = this.vaultManager.getSessionByAgent(verified.fingerprint!);
+        if (!session) {
+          res.status(403).json({ error: 'No active session' });
+          return;
+        }
+
+        this.vaultManager.touchSession(session.id);
+        const secrets = this.vaultManager.listSecrets();
+        res.json({ secrets });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' });
+      }
+    });
+
+    // POST /api/secrets/create-request — agent requests creating a new secret
+    this.app.post('/api/secrets/create-request', async (req: Request, res: Response) => {
+      try {
+        const verified = await verifySignedRequest(req.body);
+        if (!verified.valid) {
+          res.status(401).json({ error: verified.error });
+          return;
+        }
+
+        const { name, tags } = req.body;
+        if (!name) {
+          res.status(400).json({ error: 'Secret name required' });
+          return;
+        }
+
+        const requestId = crypto.randomUUID();
+        const baseUrl = this.config.web.externalUrl;
+        pendingSecretCreations.set(requestId, {
+          name,
+          tags: tags || [],
+          agentFingerprint: verified.fingerprint!,
+          status: 'pending',
+          expiresAt: Date.now() + 10 * 60 * 1000,
+          listeners: new Set(),
+        });
+
+        res.json({
+          needsApproval: true,
+          approvalUrl: `${baseUrl}/create-secret?id=${requestId}`,
+          listenUrl: `${baseUrl}/api/secrets/create-request/${requestId}/listen`,
+          requestId,
+          expiresAt: Date.now() + 10 * 60 * 1000,
+        });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' });
+      }
+    });
+
+    // GET /api/secrets/create-request/:id
+    this.app.get('/api/secrets/create-request/:id', (req: Request, res: Response) => {
+      const cr = pendingSecretCreations.get(req.params.id);
+      if (!cr || cr.expiresAt < Date.now()) {
+        res.status(404).json({ error: 'Request not found or expired' });
+        return;
+      }
+      res.json({ name: cr.name, tags: cr.tags, status: cr.status, expiresAt: cr.expiresAt });
+    });
+
+    // GET /api/secrets/create-request/:id/listen — SSE
+    this.app.get('/api/secrets/create-request/:id/listen', (req: Request, res: Response) => {
+      const cr = pendingSecretCreations.get(req.params.id);
+      if (!cr || cr.expiresAt < Date.now()) {
+        res.status(404).json({ error: 'Request not found or expired' });
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      });
+      res.write('data: {"status":"connected"}\n\n');
+      const listener = (event: any) => {
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+        if (event.status === 'approved' || event.status === 'rejected') res.end();
+      };
+      cr.listeners.add(listener);
+      req.on('close', () => cr.listeners.delete(listener));
+    });
+
+    // POST /api/secrets/create-request/:id/approve — user fills content and approves
+    this.app.post('/api/secrets/create-request/:id/approve', async (req: Request, res: Response) => {
+      if (!checkRateLimit(req.ip || 'unknown')) {
+        res.status(429).json({ error: 'Too many attempts' });
+        return;
+      }
+      const cr = pendingSecretCreations.get(req.params.id);
+      if (!cr || cr.expiresAt < Date.now()) {
+        res.status(404).json({ error: 'Request not found or expired' });
+        return;
+      }
+      try {
+        const { challengeId, response, password, content } = req.body;
+        if (!password || !challengeId || !response || !content) {
+          res.status(400).json({ error: 'Passkey + password + content required' });
+          return;
+        }
+
+        // Verify WebAuthn
+        const metadata = await this.vaultManager.getMetadata();
+        if (!metadata) { res.status(404).json({ error: 'No vault' }); return; }
+        let verified = false;
+        for (const cred of metadata.credentials) {
+          const result = await this.webauthn.verifyAuthentication(challengeId, response, {
+            id: cred.id, publicKey: cred.publicKey, algorithm: cred.algorithm, counter: 0, createdAt: 0,
+          });
+          if (result.success) { verified = true; break; }
+        }
+        if (!verified) { res.status(401).json({ error: 'Passkey verification failed' }); return; }
+
+        // Verify password → derive VEK
+        const authMeta = await this.vaultManager.getAuthMetadata();
+        if (!authMeta) { res.status(404).json({ error: 'No vault' }); return; }
+        const { deriveKeyFromPassword, fromBase64, secureWipe } = await import('../vault/encryption.js');
+        const passwordSalt = fromBase64(authMeta.passwordSalt);
+        const vek = deriveKeyFromPassword(password, passwordSalt, authMeta.kdfParams);
+
+        // Verify VEK
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, false);
+        try { await storage.load(vek); } catch { res.status(401).json({ error: 'Invalid password' }); return; }
+
+        // Ensure vault is unlocked for addSecret
+        if (!this.vaultManager.isUnlocked()) {
+          const challengeResult = this.vaultManager.createUnlockChallenge(
+            this.config.web.externalUrl, cr.agentFingerprint
+          );
+          await this.vaultManager.completeChallenge(challengeResult.challengeId, vek, true);
+        }
+
+        // Add the secret
+        const newSecret = await this.vaultManager.addSecret({
+          name: cr.name,
+          tags: cr.tags,
+          content,
+        });
+
+        cr.status = 'approved';
+        for (const listener of cr.listeners) {
+          try { listener({ status: 'approved', secretId: newSecret.id }); } catch {}
+        }
+
+        secureWipe(vek);
+        res.json({ success: true, secretId: newSecret.id });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Failed' });
+      }
+    });
+
+    // POST /api/secrets/create-request/:id/reject
+    this.app.post('/api/secrets/create-request/:id/reject', (req: Request, res: Response) => {
+      const cr = pendingSecretCreations.get(req.params.id);
+      if (!cr) { res.status(404).json({ error: 'Not found' }); return; }
+      cr.status = 'rejected';
+      for (const listener of cr.listeners) {
+        try { listener({ status: 'rejected' }); } catch {}
+      }
+      res.json({ success: true });
+    });
+
+    // ─── Management API for secrets ─────────────────────────
+
+    // GET /api/manage/secrets — list all secrets (with manage token)
+    this.app.get('/api/manage/secrets', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      try {
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, false);
+        const vault = await storage.load(session.vek);
+        const secrets = (vault.secrets || []).map(s => ({ ...s, content: '***' }));
+        res.json({ secrets });
+      } catch (error) {
+        res.status(500).json({ error: 'Failed to load secrets' });
+      }
+    });
+
+    // GET /api/manage/secrets/:id/content — get secret content (with manage token)
+    this.app.get('/api/manage/secrets/:id/content', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      try {
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, false);
+        const vault = await storage.load(session.vek);
+        const secret = (vault.secrets || []).find(s => s.id === req.params.id);
+        if (!secret) { res.status(404).json({ error: 'Secret not found' }); return; }
+        res.json({ content: secret.content });
+      } catch (error) {
+        res.status(500).json({ error: 'Failed to load secret' });
+      }
+    });
+
+    // POST /api/manage/secrets — add secret
+    this.app.post('/api/manage/secrets', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      try {
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, true);
+        const vault = await storage.load(session.vek);
+        if (!vault.secrets) vault.secrets = [];
+        const newSecret = {
+          id: crypto.randomUUID(),
+          name: req.body.name,
+          tags: req.body.tags || [],
+          content: req.body.content || '',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        vault.secrets.push(newSecret);
+        await storage.save(vault, session.vek);
+        res.json({ success: true, secret: { ...newSecret, content: '***' } });
+      } catch (error) {
+        res.status(500).json({ error: 'Failed to add secret' });
+      }
+    });
+
+    // PUT /api/manage/secrets/:id — update secret
+    this.app.put('/api/manage/secrets/:id', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      try {
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, true);
+        const vault = await storage.load(session.vek);
+        if (!vault.secrets) vault.secrets = [];
+        const secret = vault.secrets.find(s => s.id === req.params.id);
+        if (!secret) { res.status(404).json({ error: 'Secret not found' }); return; }
+        if (req.body.name !== undefined) secret.name = req.body.name;
+        if (req.body.tags !== undefined) secret.tags = req.body.tags;
+        if (req.body.content !== undefined) secret.content = req.body.content;
+        secret.updatedAt = Date.now();
+        await storage.save(vault, session.vek);
+        res.json({ success: true, secret: { ...secret, content: '***' } });
+      } catch (error) {
+        res.status(500).json({ error: 'Failed to update secret' });
+      }
+    });
+
+    // DELETE /api/manage/secrets/:id — delete secret (requires passkey)
+    this.app.delete('/api/manage/secrets/:id', async (req: Request, res: Response) => {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const session = token ? manageSessions.get(token) : null;
+      if (!session || session.expiresAt < Date.now()) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      const { challengeId, webauthnResponse } = req.body || {};
+      if (!challengeId || !webauthnResponse) {
+        res.status(403).json({ error: 'Passkey verification required' });
+        return;
+      }
+      try {
+        const metadata = await this.vaultManager.getMetadata();
+        if (!metadata) { res.status(404).json({ error: 'No vault' }); return; }
+        let verified = false;
+        for (const cred of metadata.credentials) {
+          const result = await this.webauthn.verifyAuthentication(challengeId, webauthnResponse, {
+            id: cred.id, publicKey: cred.publicKey, algorithm: cred.algorithm, counter: 0, createdAt: 0,
+          });
+          if (result.success) { verified = true; break; }
+        }
+        if (!verified) { res.status(403).json({ error: 'Passkey verification failed' }); return; }
+
+        const { VaultStorage } = await import('../vault/storage.js');
+        const storage = new VaultStorage(this.config.vault.path, true);
+        const vault = await storage.load(session.vek);
+        if (!vault.secrets) vault.secrets = [];
+        vault.secrets = vault.secrets.filter(s => s.id !== req.params.id);
+        await storage.save(vault, session.vek);
+        res.json({ success: true });
+      } catch (error) {
+        res.status(500).json({ error: 'Failed to delete secret' });
+      }
+    });
+
     this.app.get('/approve-exec', (_req: Request, res: Response) => {
       res.sendFile(path.join(__dirname, '../../web/approve-exec.html'));
     });
@@ -1644,6 +2231,16 @@ export class WebServer {
     // Serve host approval page
     this.app.get('/approve-host', (_req: Request, res: Response) => {
       res.sendFile(path.join(__dirname, '../../web/approve-host.html'));
+    });
+
+    // Serve secret approval page
+    this.app.get('/approve-secret', (_req: Request, res: Response) => {
+      res.sendFile(path.join(__dirname, '../../web/approve-secret.html'));
+    });
+
+    // Serve secret creation page
+    this.app.get('/create-secret', (_req: Request, res: Response) => {
+      res.sendFile(path.join(__dirname, '../../web/create-secret.html'));
     });
 
     // Authenticate for management
@@ -1741,6 +2338,7 @@ export class WebServer {
 
         res.json({
           hosts: vault.hosts.map(h => ({ ...h, credential: '***' })), // Hide credentials
+          secrets: (vault.secrets || []).map(s => ({ ...s, content: '***' })),
           agents: vault.agents,
           sessions: this.vaultManager.getActiveSessions().map(s => ({
             id: s.id,

@@ -206,6 +206,43 @@ const TOOLS: Tool[] = [
       required: ['challengeId'],
     },
   },
+  // --- Secret tools ---
+  {
+    name: 'request_secret',
+    description: 'Request access to a secret by name. If session exists, returns content directly. Otherwise returns an approval URL for the user.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Secret name' },
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: ['name', ...SIGNATURE_REQUIRED],
+    },
+  },
+  {
+    name: 'list_secrets',
+    description: 'List all secrets (name and tags only, no content). Requires active session.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: SIGNATURE_REQUIRED,
+    },
+  },
+  {
+    name: 'create_secret_request',
+    description: 'Request creation of a new secret. Returns an approval URL where the user fills in the secret content.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Secret name' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Tags for the secret' },
+        ...SIGNATURE_PROPERTIES,
+      },
+      required: ['name', ...SIGNATURE_REQUIRED],
+    },
+  },
   // --- Snippet tools ---
   {
     name: 'snippet_save',
@@ -399,6 +436,15 @@ export class MCPServer {
 
           case 'revoke_session':
             return this.handleRevokeSession(fingerprint);
+
+          case 'request_secret':
+            return await this.handleRequestSecret(typedArgs, fingerprint);
+
+          case 'list_secrets':
+            return this.handleListSecrets(fingerprint);
+
+          case 'create_secret_request':
+            return await this.handleCreateSecretRequest(typedArgs, fingerprint);
 
           case 'snippet_save':
             return this.handleSnippetSave(typedArgs);
@@ -784,6 +830,66 @@ export class MCPServer {
           message: 'Session revoked',
         }, null, 2),
       }],
+    };
+  }
+
+  // --- Secret handlers ---
+
+  private async handleRequestSecret(args: Record<string, unknown>, fingerprint: string) {
+    const name = args.name as string;
+
+    if (!this.vaultManager.isUnlocked()) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'Vault is locked. Use request_unlock first.' }) }], isError: true };
+    }
+
+    const secret = this.vaultManager.getSecret(name);
+    if (!secret) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: `Secret '${name}' not found` }) }], isError: true };
+    }
+
+    const session = this.vaultManager.getSessionByAgent(fingerprint);
+    if (session) {
+      const content = await this.vaultManager.decryptSecretContent(name);
+      this.vaultManager.touchSession(session.id);
+      return { content: [{ type: 'text', text: JSON.stringify({ content, sessionId: session.id }, null, 2) }] };
+    }
+
+    // No session - need approval via web
+    const baseUrl = this.config.web.externalUrl;
+    return {
+      content: [{ type: 'text', text: JSON.stringify({
+        needsApproval: true,
+        message: `Secret access requires approval. Use request_unlock first, or access via: ${baseUrl}`,
+      }, null, 2) }],
+    };
+  }
+
+  private handleListSecrets(fingerprint: string) {
+    if (!this.vaultManager.isUnlocked()) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'Vault is locked' }) }], isError: true };
+    }
+
+    const session = this.vaultManager.getSessionByAgent(fingerprint);
+    if (!session) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'No active session' }) }], isError: true };
+    }
+
+    this.vaultManager.touchSession(session.id);
+    const secrets = this.vaultManager.listSecrets();
+    return { content: [{ type: 'text', text: JSON.stringify({ secrets }, null, 2) }] };
+  }
+
+  private async handleCreateSecretRequest(args: Record<string, unknown>, _fingerprint: string) {
+    const name = args.name as string;
+    const tags = (args.tags as string[]) || [];
+    const baseUrl = this.config.web.externalUrl;
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify({
+        message: `To create secret '${name}', use the HTTP API: POST ${baseUrl}/api/secrets/create-request`,
+        name,
+        tags,
+      }, null, 2) }],
     };
   }
 

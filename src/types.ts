@@ -21,10 +21,19 @@ export interface Host {
   updatedAt: number;
 }
 
+export interface Secret {
+  id: string;
+  name: string;               // "yimin_test", "aws-prod-key"
+  tags: string[];             // ["ssh", "server"], ["api", "aws"]
+  content: string;            // Markdown content (encrypted at rest)
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface AgentConfig {
   fingerprint: string;        // "SHA256:abc123..."
   name: string;               // "coding-agent"
-  allowedHosts: string[];     // ["dev-*", "staging-*"]
+  allowedHosts: string[];     // ["dev-*", "staging-*"] - legacy, also used for secret access
   createdAt: number;
   lastUsed: number;
 }
@@ -48,7 +57,8 @@ export interface Vault {
   version: 1;
   owner: PasskeyCredential;
   credentials: PasskeyCredential[];  // All registered passkeys (includes owner)
-  hosts: Host[];
+  hosts: Host[];              // Legacy - migrated to secrets on load
+  secrets: Secret[];          // General-purpose encrypted secrets
   agents: AgentConfig[];
   policy: GlobalPolicy;
 }

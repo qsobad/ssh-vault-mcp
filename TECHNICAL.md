@@ -1,4 +1,4 @@
-# SSH Vault MCP — Technical Reference
+# Secret Vault MCP — Technical Reference
 
 ## Architecture
 
@@ -13,6 +13,48 @@
 │ (Claude etc) │     MCP tools               │  (stdio/HTTP)│        Hosts
 └──────────────┘                             └──────────────┘
 ```
+
+## Secret Storage
+
+Each secret is stored as an encrypted markdown document with metadata:
+
+```json
+{
+  "id": "uuid",
+  "name": "my-server",
+  "tags": ["ssh", "production"],
+  "content": "# my-server\n- host: 1.2.3.4\n- user: root\n- password: xxx",
+  "createdAt": 1234567890,
+  "updatedAt": 1234567890
+}
+```
+
+### SSH Secret Format
+
+Secrets tagged with `ssh` can be used for SSH command execution. The markdown content is parsed for:
+- `- host: <hostname>` — SSH host
+- `- port: <port>` — SSH port (default: 22)
+- `- user: <username>` — SSH username
+- `- password: <password>` — Password auth
+- `- key: <private-key>` — Key auth
+
+### API Endpoints (Secrets)
+
+**Agent endpoints (require Ed25519 signature):**
+- `POST /api/secrets/request` — Request a secret's content by name
+- `GET /api/secrets/list` — List secret names and tags
+- `POST /api/secrets/create-request` — Request creation of a new secret
+
+**Management endpoints (require manage session):**
+- `GET /api/manage/secrets` — List all secrets
+- `GET /api/manage/secrets/:id/content` — Get secret content
+- `POST /api/manage/secrets` — Add secret
+- `PUT /api/manage/secrets/:id` — Update secret
+- `DELETE /api/manage/secrets/:id` — Delete secret (requires passkey)
+
+### Migration
+
+When loading a vault with `hosts` but no `secrets`, hosts are automatically migrated to secrets with the `ssh` tag. The original `hosts` array is preserved for backward compatibility.
 
 ## Docker Setup
 
