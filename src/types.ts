@@ -8,19 +8,6 @@ export interface PasskeyCredential {
   createdAt: number;
 }
 
-export interface Host {
-  id: string;
-  name: string;               // "dev-01"
-  hostname: string;           // "192.168.1.100"
-  port: number;               // 22
-  username: string;
-  authType: "key" | "password";
-  credential: string;         // Encrypted private key or password
-  tags: string[];             // ["dev", "backend"]
-  createdAt: number;
-  updatedAt: number;
-}
-
 export interface Secret {
   id: string;
   name: string;               // "yimin_test", "aws-prod-key"
@@ -57,7 +44,6 @@ export interface Vault {
   version: 1;
   owner: PasskeyCredential;
   credentials: PasskeyCredential[];  // All registered passkeys (includes owner)
-  hosts: Host[];              // Legacy - migrated to secrets on load
   secrets: Secret[];          // General-purpose encrypted secrets
   agents: AgentConfig[];
   policy: GlobalPolicy;

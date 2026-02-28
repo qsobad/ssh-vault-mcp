@@ -4,7 +4,7 @@
  */
 
 import { randomUUID } from 'crypto';
-import type { Vault, Host, AgentConfig, Session, UnlockChallenge, PasskeyCredential, GlobalPolicy, Secret } from '../types.js';
+import type { Vault, AgentConfig, Session, UnlockChallenge, PasskeyCredential, GlobalPolicy, Secret } from '../types.js';
 import { VaultStorage } from './storage.js';
 import { generateRandomId, generateUnlockCode, secureWipe, initSodium } from './encryption.js';
 
@@ -83,25 +83,8 @@ export class VaultManager {
   private stripCredentials(vault: Vault): Vault {
     return {
       ...vault,
-      hosts: vault.hosts.map(h => ({ ...h, credential: '[encrypted]' })),
       secrets: (vault.secrets || []).map(s => ({ ...s, content: '[encrypted]' })),
     };
-  }
-
-  /**
-   * Decrypt a single host's credential on-demand from the vault file.
-   * Caller MUST secureWipe the returned buffer after use.
-   */
-  async decryptHostCredential(hostNameOrId: string): Promise<string> {
-    if (!this.currentSignature) {
-      throw new Error('Vault is locked');
-    }
-    this.resetAutoLockTimer();
-    const credential = await this.storage.decryptHostCredential(hostNameOrId, this.currentSignature);
-    if (credential === null) {
-      throw new Error(`Host '${hostNameOrId}' not found`);
-    }
-    return credential;
   }
 
   /**
@@ -620,70 +603,6 @@ export class VaultManager {
     }
     this.vault = null;
     this.sessions.clear();
-  }
-
-  /**
-   * Get all hosts (requires unlocked vault)
-   */
-  getHosts(): Host[] {
-    if (!this.vault) {
-      throw new Error('Vault is locked');
-    }
-    return this.vault.hosts;
-  }
-
-  /**
-   * Get host by name or ID
-   */
-  getHost(nameOrId: string): Host | null {
-    if (!this.vault) {
-      throw new Error('Vault is locked');
-    }
-    return this.vault.hosts.find(h => h.id === nameOrId || h.name === nameOrId) ?? null;
-  }
-
-  /**
-   * Add a host
-   */
-  async addHost(host: Omit<Host, 'id' | 'createdAt' | 'updatedAt'>): Promise<Host> {
-    if (!this.currentSignature) {
-      throw new Error('Vault is locked');
-    }
-    this.resetAutoLockTimer();
-
-    const fullVault = await this.storage.load(this.currentSignature);
-    const newHost: Host = {
-      ...host,
-      id: randomUUID(),
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-
-    fullVault.hosts.push(newHost);
-    await this.storage.save(fullVault, this.currentSignature);
-    this.vault = this.stripCredentials(fullVault);
-    return { ...newHost, credential: '[encrypted]' };
-  }
-
-  /**
-   * Remove a host
-   */
-  async removeHost(hostId: string): Promise<boolean> {
-    if (!this.currentSignature) {
-      throw new Error('Vault is locked');
-    }
-    this.resetAutoLockTimer();
-
-    const fullVault = await this.storage.load(this.currentSignature);
-    const index = fullVault.hosts.findIndex(h => h.id === hostId);
-    if (index === -1) {
-      return false;
-    }
-
-    fullVault.hosts.splice(index, 1);
-    await this.storage.save(fullVault, this.currentSignature);
-    this.vault = this.stripCredentials(fullVault);
-    return true;
   }
 
   /**

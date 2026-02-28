@@ -57,31 +57,18 @@ export class WebServer {
     this.sshProxy = new SSHProxy(
       async (hostName: string) => {
         await this.vaultManager.reloadVault();
-        // Try secrets first, then legacy hosts
         const secret = this.vaultManager.getSecret(hostName);
-        if (secret) {
-          const content = await this.vaultManager.decryptSecretContent(hostName);
-          const sshInfo = VaultManager.parseSSHFromSecret(content);
-          if (!sshInfo) return null;
-          const credential = sshInfo.key || sshInfo.password || '';
-          return {
-            hostname: sshInfo.host,
-            port: sshInfo.port,
-            username: sshInfo.user,
-            credential,
-            authType: (sshInfo.key ? 'key' : 'password') as 'key' | 'password',
-          };
-        }
-        // Legacy host fallback
-        const host = this.vaultManager.getHost(hostName);
-        if (!host) return null;
-        const credential = await this.vaultManager.decryptHostCredential(hostName);
+        if (!secret) return null;
+        const content = await this.vaultManager.decryptSecretContent(hostName);
+        const sshInfo = VaultManager.parseSSHFromSecret(content);
+        if (!sshInfo) return null;
+        const credential = sshInfo.key || sshInfo.password || '';
         return {
-          hostname: host.hostname,
-          port: host.port || 22,
-          username: host.username,
+          hostname: sshInfo.host,
+          port: sshInfo.port,
+          username: sshInfo.user,
           credential,
-          authType: (host.authType || (credential.includes('PRIVATE KEY') ? 'key' : 'password')) as 'key' | 'password',
+          authType: (sshInfo.key ? 'key' : 'password') as 'key' | 'password',
         };
       },
       (_fingerprint, sessionId, targetHost) => {
@@ -112,31 +99,18 @@ export class WebServer {
     authType: 'key' | 'password';
   } | null> {
     await this.vaultManager.reloadVault();
-    // Try secrets first
     const secret = this.vaultManager.getSecret(hostName);
-    if (secret) {
-      const content = await this.vaultManager.decryptSecretContent(hostName);
-      const sshInfo = VaultManager.parseSSHFromSecret(content);
-      if (!sshInfo) return null;
-      const credential = sshInfo.key || sshInfo.password || '';
-      return {
-        hostname: sshInfo.host,
-        port: sshInfo.port,
-        username: sshInfo.user,
-        credential,
-        authType: sshInfo.key ? 'key' : 'password',
-      };
-    }
-    // Legacy host fallback
-    const host = this.vaultManager.getHost(hostName);
-    if (!host) return null;
-    const credential = await this.vaultManager.decryptHostCredential(hostName);
+    if (!secret) return null;
+    const content = await this.vaultManager.decryptSecretContent(hostName);
+    const sshInfo = VaultManager.parseSSHFromSecret(content);
+    if (!sshInfo) return null;
+    const credential = sshInfo.key || sshInfo.password || '';
     return {
-      hostname: host.hostname,
-      port: host.port || 22,
-      username: host.username,
+      hostname: sshInfo.host,
+      port: sshInfo.port,
+      username: sshInfo.user,
       credential,
-      authType: (host.authType || (credential.includes('PRIVATE KEY') ? 'key' : 'password')) as 'key' | 'password',
+      authType: sshInfo.key ? 'key' : 'password',
     };
   }
 
@@ -369,53 +343,17 @@ export class WebServer {
       }
 
       try {
-        // Reload vault to get latest config (credentials stripped)
-        await this.vaultManager.reloadVault();
-        
-        // Try secrets first, then legacy hosts
-        const { secureWipe: wipe } = await import('../vault/encryption.js');
-        let connectHostname: string;
-        let connectPort: number;
-        let connectUsername: string;
-        let credential: string;
-        let authType: string;
-
-        const secret = this.vaultManager.getSecret(host);
-        if (secret) {
-          try {
-            const content = await this.vaultManager.decryptSecretContent(host);
-            const sshInfo = VaultManager.parseSSHFromSecret(content);
-            if (!sshInfo) {
-              res.status(400).json({ error: `Secret '${host}' does not contain SSH connection info` });
-              return;
-            }
-            connectHostname = sshInfo.host;
-            connectPort = sshInfo.port;
-            connectUsername = sshInfo.user;
-            credential = sshInfo.key || sshInfo.password || '';
-            authType = sshInfo.key ? 'key' : 'password';
-          } catch (err) {
-            res.status(500).json({ error: 'Failed to decrypt secret: ' + (err instanceof Error ? err.message : String(err)) });
-            return;
-          }
-        } else {
-          // Legacy host fallback
-          const hostConfig = this.vaultManager.getHost(host);
-          if (!hostConfig) {
-            res.status(404).json({ error: `Host/secret '${host}' not found` });
-            return;
-          }
-          try {
-            credential = await this.vaultManager.decryptHostCredential(host);
-          } catch (err) {
-            res.status(500).json({ error: 'Failed to decrypt credential: ' + (err instanceof Error ? err.message : String(err)) });
-            return;
-          }
-          connectHostname = hostConfig.hostname;
-          connectPort = hostConfig.port || 22;
-          connectUsername = hostConfig.username;
-          authType = hostConfig.authType || (credential.includes('PRIVATE KEY') ? 'key' : 'password');
+        const resolved = await this.resolveSSHHost(host);
+        if (!resolved) {
+          res.status(404).json({ error: `Secret '${host}' not found or has no SSH info` });
+          return;
         }
+        const { secureWipe: wipe } = await import('../vault/encryption.js');
+        const connectHostname = resolved.hostname;
+        const connectPort = resolved.port;
+        const connectUsername = resolved.username;
+        const credential = resolved.credential;
+        const authType = resolved.authType;
 
         // Execute SSH command
         const { Client } = await import('ssh2');
@@ -1357,26 +1295,32 @@ export class WebServer {
         const storage = new VaultStorage(this.config.vault.path, true);
         const vault = await storage.load(session.vek);
 
-        const hostId = crypto.randomUUID();
-        const newHost = {
-          id: hostId,
+        // Create SSH secret from host request
+        const secretId = crypto.randomUUID();
+        const lines = [`# ${hr.name}`];
+        lines.push(`- host: ${hr.host}`);
+        lines.push(`- port: ${hr.port}`);
+        lines.push(`- user: ${hr.username}`);
+        if (finalAuthType === 'password') {
+          lines.push(`- password: ${finalCredential}`);
+        } else {
+          lines.push(`- key: ${finalCredential}`);
+        }
+        const newSecret = {
+          id: secretId,
           name: hr.name,
-          hostname: hr.host,
-          host: hr.host,
-          port: hr.port,
-          username: hr.username,
-          credential: finalCredential,
-          authType: finalAuthType as 'key' | 'password',
-          tags: [] as string[],
+          tags: ['ssh'],
+          content: lines.join('\n'),
           createdAt: Date.now(),
           updatedAt: Date.now(),
         };
 
-        vault.hosts.push(newHost);
+        if (!vault.secrets) vault.secrets = [];
+        vault.secrets.push(newSecret);
         await storage.save(vault, session.vek);
 
         hr.status = 'approved';
-        hr.result = { id: hostId, name: hr.name, host: hr.host };
+        hr.result = { id: secretId, name: hr.name, host: hr.host };
 
         console.error('[host-request] Host approved:', hr.name, hr.host);
         res.json({ success: true, host: hr.result });
@@ -2337,7 +2281,6 @@ export class WebServer {
         const vault = await storage.load(session.vek);
 
         res.json({
-          hosts: vault.hosts.map(h => ({ ...h, credential: '***' })), // Hide credentials
           secrets: (vault.secrets || []).map(s => ({ ...s, content: '***' })),
           agents: vault.agents,
           sessions: this.vaultManager.getActiveSessions().map(s => ({
@@ -2351,130 +2294,6 @@ export class WebServer {
         });
       } catch (error) {
         res.status(500).json({ error: 'Failed to load vault' });
-      }
-    });
-
-    // Add host
-    this.app.post('/api/manage/hosts', async (req: Request, res: Response) => {
-      const token = req.headers.authorization?.replace('Bearer ', '');
-      const session = token ? manageSessions.get(token) : null;
-      
-      if (!session || session.expiresAt < Date.now()) {
-        res.status(401).json({ error: 'Unauthorized' });
-        return;
-      }
-
-      try {
-        const { VaultStorage } = await import('../vault/storage.js');
-        const storage = new VaultStorage(this.config.vault.path, true);
-        console.log('[add-host] Loading vault with VEK...');
-        const vault = await storage.load(session.vek);
-        console.log('[add-host] Vault loaded, hosts:', vault.hosts.length);
-
-        const newHost = {
-          id: crypto.randomUUID(),
-          name: req.body.name,
-          hostname: req.body.hostname,
-          port: req.body.port || 22,
-          username: req.body.username,
-          authType: req.body.authType || 'key',
-          credential: req.body.credential || '',
-          tags: req.body.tags || [],
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        };
-
-        vault.hosts.push(newHost);
-        console.log('[add-host] Saving vault...');
-        await storage.save(vault, session.vek);
-        console.log('[add-host] Saved successfully');
-
-        res.json({ success: true, host: { ...newHost, credential: '***' } });
-      } catch (error) {
-        console.error('[add-host] Error:', error);
-        res.status(500).json({ error: 'Failed to add host: ' + (error instanceof Error ? error.message : String(error)) });
-      }
-    });
-
-    // Update host
-    this.app.put('/api/manage/hosts/:id', async (req: Request, res: Response) => {
-      const token = req.headers.authorization?.replace('Bearer ', '');
-      const session = token ? manageSessions.get(token) : null;
-      
-      if (!session || session.expiresAt < Date.now()) {
-        res.status(401).json({ error: 'Unauthorized' });
-        return;
-      }
-
-      try {
-        const { VaultStorage } = await import('../vault/storage.js');
-        const storage = new VaultStorage(this.config.vault.path, true);
-        const vault = await storage.load(session.vek);
-
-        const hostIndex = vault.hosts.findIndex(h => h.id === req.params.id);
-        if (hostIndex === -1) {
-          res.status(404).json({ error: 'Host not found' });
-          return;
-        }
-
-        // Update fields
-        const host = vault.hosts[hostIndex];
-        if (req.body.name) host.name = req.body.name;
-        if (req.body.hostname) host.hostname = req.body.hostname;
-        if (req.body.port) host.port = req.body.port;
-        if (req.body.username) host.username = req.body.username;
-        if (req.body.tags) host.tags = req.body.tags;
-        if (req.body.credential) host.credential = req.body.credential;
-        host.updatedAt = Date.now();
-
-        await storage.save(vault, session.vek);
-        res.json({ success: true, host: { ...host, credential: '***' } });
-      } catch (error) {
-        console.error('[update-host] Error:', error);
-        res.status(500).json({ error: 'Failed to update host' });
-      }
-    });
-
-    // Delete host
-    this.app.delete('/api/manage/hosts/:id', async (req: Request, res: Response) => {
-      const token = req.headers.authorization?.replace('Bearer ', '');
-      const session = token ? manageSessions.get(token) : null;
-      
-      if (!session || session.expiresAt < Date.now()) {
-        res.status(401).json({ error: 'Unauthorized' });
-        return;
-      }
-
-      // Require passkey re-verification
-      const { challengeId, webauthnResponse } = req.body || {};
-      if (!challengeId || !webauthnResponse) {
-        res.status(403).json({ error: 'Passkey verification required' });
-        return;
-      }
-
-      try {
-        const metadata = await this.vaultManager.getMetadata();
-        if (!metadata) { res.status(404).json({ error: 'No vault' }); return; }
-
-        let verified = false;
-        for (const cred of metadata.credentials) {
-          const result = await this.webauthn.verifyAuthentication(challengeId, webauthnResponse, {
-            id: cred.id, publicKey: cred.publicKey, algorithm: cred.algorithm, counter: 0, createdAt: 0,
-          });
-          if (result.success) { verified = true; break; }
-        }
-        if (!verified) { res.status(403).json({ error: 'Passkey verification failed' }); return; }
-
-        const { VaultStorage } = await import('../vault/storage.js');
-        const storage = new VaultStorage(this.config.vault.path, true);
-        const vault = await storage.load(session.vek);
-
-        vault.hosts = vault.hosts.filter(h => h.id !== req.params.id);
-        await storage.save(vault, session.vek);
-
-        res.json({ success: true });
-      } catch (error) {
-        res.status(500).json({ error: 'Failed to delete host' });
       }
     });
 

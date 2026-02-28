@@ -24,19 +24,10 @@ const SubmitUnlockSchema = z.object({
   unlock_code: z.string().describe('Unlock code from the signing page'),
 });
 
-const ListHostsSchema = z.object({
-  filter: z.string().optional().describe('Host name filter (supports wildcards)'),
-});
-
 const ExecuteCommandSchema = z.object({
-  host: z.string().describe('Host name or ID'),
+  host: z.string().describe('Secret name containing SSH info'),
   command: z.string().describe('Command to execute'),
   timeout: z.number().optional().default(30).describe('Timeout in seconds'),
-});
-
-const ManageVaultSchema = z.object({
-  action: z.enum(['add_host', 'remove_host', 'update_host', 'add_agent', 'remove_agent']),
-  data: z.record(z.unknown()).describe('Action-specific data'),
 });
 
 // Common signature properties for authenticated tools
@@ -101,21 +92,6 @@ const TOOLS: Tool[] = [
     },
   },
   {
-    name: 'list_hosts',
-    description: 'List available SSH hosts (requires unlocked vault). Requires signed request.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        filter: {
-          type: 'string',
-          description: 'Filter hosts by name pattern (supports wildcards like dev-*)',
-        },
-        ...SIGNATURE_PROPERTIES,
-      },
-      required: SIGNATURE_REQUIRED,
-    },
-  },
-  {
     name: 'execute_command',
     description: 'Execute a command on an SSH host. May require approval for commands outside policy. Requires signed request.',
     inputSchema: {
@@ -138,26 +114,7 @@ const TOOLS: Tool[] = [
       required: ['host', 'command', ...SIGNATURE_REQUIRED],
     },
   },
-  {
-    name: 'manage_vault',
-    description: 'Manage vault contents (add/remove hosts and agents). Requires Passkey confirmation. Requires signed request.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          enum: ['add_host', 'remove_host', 'update_host', 'add_agent', 'remove_agent'],
-          description: 'Management action to perform',
-        },
-        data: {
-          type: 'object',
-          description: 'Action-specific data',
-        },
-        ...SIGNATURE_PROPERTIES,
-      },
-      required: ['action', 'data', ...SIGNATURE_REQUIRED],
-    },
-  },
+
   {
     name: 'revoke_session',
     description: 'Revoke the current session and lock the vault. Requires signed request.',
@@ -417,10 +374,6 @@ export class MCPServer {
             const unlockArgs = SubmitUnlockSchema.parse(typedArgs);
             return this.handleSubmitUnlock(unlockArgs.unlock_code, fingerprint);
 
-          case 'list_hosts':
-            const listArgs = ListHostsSchema.parse(typedArgs);
-            return this.handleListHosts(listArgs.filter, fingerprint);
-
           case 'execute_command':
             const execArgs = ExecuteCommandSchema.parse(typedArgs);
             return this.handleExecuteCommand(
@@ -429,10 +382,6 @@ export class MCPServer {
               execArgs.timeout,
               fingerprint
             );
-
-          case 'manage_vault':
-            const manageArgs = ManageVaultSchema.parse(typedArgs);
-            return this.handleManageVault(manageArgs.action, manageArgs.data, fingerprint);
 
           case 'revoke_session':
             return this.handleRevokeSession(fingerprint);
@@ -618,45 +567,6 @@ export class MCPServer {
     };
   }
 
-  private handleListHosts(filter: string | undefined, _fingerprint: string) {
-    if (!this.vaultManager.isUnlocked()) {
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({
-            error: 'Vault is locked. Use request_unlock first.',
-          }, null, 2),
-        }],
-        isError: true,
-      };
-    }
-
-    let hosts = this.vaultManager.getHosts();
-    
-    // Apply filter if provided
-    if (filter) {
-      const { minimatch } = require('minimatch');
-      hosts = hosts.filter(h => minimatch(h.name, filter));
-    }
-
-    // Return safe info (without credentials)
-    const safeHosts = hosts.map(h => ({
-      id: h.id,
-      name: h.name,
-      hostname: h.hostname,
-      port: h.port,
-      username: h.username,
-      tags: h.tags,
-    }));
-
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify({ hosts: safeHosts }, null, 2),
-      }],
-    };
-  }
-
   private async handleExecuteCommand(
     hostName: string,
     command: string,
@@ -675,12 +585,12 @@ export class MCPServer {
       };
     }
 
-    const host = this.vaultManager.getHost(hostName);
-    if (!host) {
+    const secret = this.vaultManager.getSecret(hostName);
+    if (!secret) {
       return {
         content: [{
           type: 'text',
-          text: JSON.stringify({ error: `Host not found: ${hostName}` }, null, 2),
+          text: JSON.stringify({ error: `Secret not found: ${hostName}` }, null, 2),
         }],
         isError: true,
       };
@@ -716,7 +626,7 @@ export class MCPServer {
     // Check policy
     const policyResult = this.policyEngine.checkCommand(
       agent,
-      host.name,
+      hostName,
       command,
       policy,
       session || undefined
@@ -727,7 +637,7 @@ export class MCPServer {
       const { approvalUrl, listenUrl, challengeId, expiresAt } = this.vaultManager.createApprovalChallenge(
         this.config.web.externalUrl,
         fingerprint,
-        host.name,
+        hostName,
         [command]
       );
 
@@ -763,9 +673,34 @@ export class MCPServer {
       };
     }
 
+    // Resolve SSH info from secret
+    let sshHost;
+    try {
+      const content = await this.vaultManager.decryptSecretContent(hostName);
+      const sshInfo = (await import('../vault/vault.js')).VaultManager.parseSSHFromSecret(content);
+      if (!sshInfo) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: `Secret '${hostName}' has no SSH info` }) }],
+          isError: true,
+        };
+      }
+      sshHost = {
+        hostname: sshInfo.host,
+        port: sshInfo.port,
+        username: sshInfo.user,
+        credential: sshInfo.key || sshInfo.password || '',
+        authType: (sshInfo.key ? 'key' : 'password') as 'key' | 'password',
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ error: `Failed to decrypt secret: ${err instanceof Error ? err.message : String(err)}` }) }],
+        isError: true,
+      };
+    }
+
     // Execute command
     try {
-      const result = await this.sshExecutor.execute(host, command, timeout * 1000);
+      const result = await this.sshExecutor.execute(sshHost, command, timeout * 1000);
       return {
         content: [{
           type: 'text',
@@ -788,31 +723,6 @@ export class MCPServer {
         isError: true,
       };
     }
-  }
-
-  private handleManageVault(action: string, _data: Record<string, unknown>, fingerprint: string) {
-    // All vault management requires Passkey approval
-    const { approvalUrl, listenUrl, challengeId, expiresAt } = this.vaultManager.createApprovalChallenge(
-      this.config.web.externalUrl,
-      fingerprint,
-      '*',
-      [`manage_vault:${action}`]
-    );
-
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify({
-          needsApproval: true,
-          action,
-          approvalUrl,
-          listenUrl,
-          challengeId,
-          expiresAt,
-          message: 'Vault management requires Passkey approval.',
-        }, null, 2),
-      }],
-    };
   }
 
   private handleRevokeSession(fingerprint: string) {

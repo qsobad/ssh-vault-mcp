@@ -5,7 +5,7 @@
 
 import { promises as fs } from 'fs';
 import path from 'path';
-import type { Vault, VaultFile, VaultFileCredential, PasskeyCredential, Secret } from '../types.js';
+import type { Vault, VaultFile, VaultFileCredential, PasskeyCredential } from '../types.js';
 import {
   initSodium,
   generateSalt,
@@ -55,7 +55,6 @@ export class VaultStorage {
       version: 1,
       owner: credential,
       credentials: [credential],
-      hosts: [],
       secrets: [],
       agents: [],
       policy: {
@@ -207,35 +206,11 @@ export class VaultStorage {
       if (!vault.credentials) {
         vault.credentials = [vault.owner];
       }
-      // Migrate hosts to secrets if needed
       if (!vault.secrets) {
         vault.secrets = [];
       }
-      if (vault.hosts && vault.hosts.length > 0 && vault.secrets.length === 0) {
-        vault.secrets = vault.hosts.map(h => this.hostToSecret(h));
-      }
       return vault;
     } catch (error) {
-      throw new Error('Failed to decrypt vault: invalid password or corrupted data');
-    }
-  }
-
-  /**
-   * Decrypt a single host's credential from the vault file on-demand
-   */
-  async decryptHostCredential(hostId: string, vek: Uint8Array): Promise<string | null> {
-    await initSodium();
-
-    const fileContent = await fs.readFile(this.vaultPath, 'utf-8');
-    const vaultFile: VaultFile = JSON.parse(fileContent);
-    const nonce = fromBase64(vaultFile.nonce);
-
-    try {
-      const vaultJson = decryptString(vaultFile.data, vek, nonce);
-      const vault = JSON.parse(vaultJson) as Vault;
-      const host = vault.hosts.find(h => h.id === hostId || h.name === hostId);
-      return host?.credential ?? null;
-    } catch {
       throw new Error('Failed to decrypt vault: invalid password or corrupted data');
     }
   }
@@ -344,29 +319,6 @@ export class VaultStorage {
     const vault = await this.load(vek);
     vault.owner.counter = newCounter;
     await this.save(vault, vek);
-  }
-
-  /**
-   * Convert a legacy Host to a Secret
-   */
-  private hostToSecret(host: import('../types.js').Host): Secret {
-    const lines = [`# ${host.name}`];
-    lines.push(`- host: ${host.hostname}`);
-    lines.push(`- port: ${host.port || 22}`);
-    lines.push(`- user: ${host.username}`);
-    if (host.authType === 'password') {
-      lines.push(`- password: ${host.credential}`);
-    } else {
-      lines.push(`- key: ${host.credential}`);
-    }
-    return {
-      id: host.id,
-      name: host.name,
-      tags: ['ssh', ...(host.tags || [])],
-      content: lines.join('\n'),
-      createdAt: host.createdAt,
-      updatedAt: host.updatedAt,
-    };
   }
 
   /**

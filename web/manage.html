@@ -305,7 +305,6 @@
 
     <div class="tabs">
       <div class="tab active" onclick="showTab('secrets')">🔒 Secrets</div>
-      <div class="tab" onclick="showTab('hosts')">🖥️ Hosts</div>
       <div class="tab" onclick="showTab('agents')">🤖 Agents</div>
       <div class="tab" onclick="showTab('sessions')">🔑 Sessions</div>
       <div class="tab" onclick="showTab('passkeys')">🔐 Passkeys</div>
@@ -839,7 +838,6 @@
         if (res.ok) {
           vaultData = await res.json();
           renderSecrets();
-          renderHosts();
           renderAgents();
           renderSessions();
           renderPolicy();

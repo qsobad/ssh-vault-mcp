@@ -4,7 +4,15 @@
  */
 
 import { Client, type ConnectConfig, type SFTPWrapper } from 'ssh2';
-import type { Host } from '../types.js';
+
+// SSH connection info (replaces old Host type dependency)
+export interface SSHHostInfo {
+  hostname: string;
+  port: number;
+  username: string;
+  credential: string;
+  authType: 'key' | 'password';
+}
 
 export interface ExecutionResult {
   output: string;
@@ -31,7 +39,7 @@ export class SSHExecutor {
    * Execute a command on a remote host
    */
   async execute(
-    host: Host,
+    host: SSHHostInfo,
     command: string,
     timeoutMs: number = 30000
   ): Promise<ExecutionResult> {
@@ -102,7 +110,7 @@ export class SSHExecutor {
   /**
    * Test connection to a host
    */
-  async testConnection(host: Host): Promise<{
+  async testConnection(host: SSHHostInfo): Promise<{
     success: boolean;
     latencyMs: number;
     error?: string;
@@ -128,7 +136,7 @@ export class SSHExecutor {
    * Execute multiple commands in sequence
    */
   async executeMultiple(
-    host: Host,
+    host: SSHHostInfo,
     commands: string[],
     timeoutMs: number = 30000
   ): Promise<ExecutionResult[]> {
@@ -151,7 +159,7 @@ export class SSHExecutor {
    * Execute a command with streaming output callback
    */
   async executeWithStream(
-    host: Host,
+    host: SSHHostInfo,
     command: string,
     onStdout: (data: string) => void,
     onStderr: (data: string) => void,
@@ -221,7 +229,7 @@ export class SSHExecutor {
   /**
    * Create an SFTP connection helper
    */
-  private connectSftp(host: Host, timeoutMs: number = 30000): Promise<{ client: Client; sftp: SFTPWrapper }> {
+  private connectSftp(host: SSHHostInfo, timeoutMs: number = 30000): Promise<{ client: Client; sftp: SFTPWrapper }> {
     return new Promise((resolve, reject) => {
       const client = new Client();
       const timeoutId = setTimeout(() => {
@@ -263,7 +271,7 @@ export class SSHExecutor {
    * Upload content to a remote file
    */
   async upload(
-    host: Host,
+    host: SSHHostInfo,
     remotePath: string,
     content: Buffer,
     timeoutMs: number = 60000
@@ -300,7 +308,7 @@ export class SSHExecutor {
    * Download a remote file
    */
   async download(
-    host: Host,
+    host: SSHHostInfo,
     remotePath: string,
     timeoutMs: number = 60000
   ): Promise<{ success: boolean; content?: Buffer; size?: number; error?: string }> {
@@ -338,7 +346,7 @@ export class SSHExecutor {
    * List files in a remote directory
    */
   async listFiles(
-    host: Host,
+    host: SSHHostInfo,
     remotePath: string,
     timeoutMs: number = 30000
   ): Promise<{ success: boolean; files?: FileListEntry[]; error?: string }> {
