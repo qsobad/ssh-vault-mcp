@@ -698,14 +698,14 @@ export class VaultManager {
   }
 
   /**
-   * List secrets (name + tags only, no content)
+   * List secrets (name + description only, no content)
    */
-  listSecrets(): { id: string; name: string; tags: string[]; createdAt: number; updatedAt: number }[] {
+  listSecrets(): { id: string; name: string; description: string; createdAt: number; updatedAt: number }[] {
     if (!this.vault) throw new Error('Vault is locked');
     return (this.vault.secrets || []).map(s => ({
       id: s.id,
       name: s.name,
-      tags: s.tags,
+      description: s.description,
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
     }));
@@ -734,7 +734,7 @@ export class VaultManager {
   /**
    * Update a secret
    */
-  async updateSecret(id: string, updates: Partial<Pick<Secret, 'name' | 'tags' | 'content'>>): Promise<Secret | null> {
+  async updateSecret(id: string, updates: Partial<Pick<Secret, 'name' | 'description' | 'content'>>): Promise<Secret | null> {
     if (!this.currentSignature) throw new Error('Vault is locked');
     this.resetAutoLockTimer();
     const fullVault = await this.storage.load(this.currentSignature);
@@ -742,7 +742,7 @@ export class VaultManager {
     const secret = fullVault.secrets.find(s => s.id === id);
     if (!secret) return null;
     if (updates.name !== undefined) secret.name = updates.name;
-    if (updates.tags !== undefined) secret.tags = updates.tags;
+    if (updates.description !== undefined) secret.description = updates.description;
     if (updates.content !== undefined) secret.content = updates.content;
     secret.updatedAt = Date.now();
     await this.storage.save(fullVault, this.currentSignature);

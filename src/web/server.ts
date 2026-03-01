@@ -1309,7 +1309,7 @@ export class WebServer {
         const newSecret = {
           id: secretId,
           name: hr.name,
-          tags: ['ssh'],
+          description: 'SSH server',
           content: lines.join('\n'),
           createdAt: Date.now(),
           updatedAt: Date.now(),
@@ -1660,7 +1660,7 @@ export class WebServer {
     // Pending secret creation requests
     const pendingSecretCreations = new Map<string, {
       name: string;
-      tags: string[];
+      description: string;
       agentFingerprint: string;
       status: 'pending' | 'approved' | 'rejected';
       expiresAt: number;
@@ -1850,7 +1850,7 @@ export class WebServer {
       res.json({ success: true });
     });
 
-    // GET /api/secrets/list — list secrets (name + tags), requires signature + session
+    // GET /api/secrets/list — list secrets (name + description), requires signature + session
     this.app.get('/api/secrets/list', async (req: Request, res: Response) => {
       try {
         // Accept signature params from query for GET request
@@ -1895,7 +1895,7 @@ export class WebServer {
           return;
         }
 
-        const { name, tags } = req.body;
+        const { name, description } = req.body;
         if (!name) {
           res.status(400).json({ error: 'Secret name required' });
           return;
@@ -1905,7 +1905,7 @@ export class WebServer {
         const baseUrl = this.config.web.externalUrl;
         pendingSecretCreations.set(requestId, {
           name,
-          tags: tags || [],
+          description: description || '',
           agentFingerprint: verified.fingerprint!,
           status: 'pending',
           expiresAt: Date.now() + 10 * 60 * 1000,
@@ -1931,7 +1931,7 @@ export class WebServer {
         res.status(404).json({ error: 'Request not found or expired' });
         return;
       }
-      res.json({ name: cr.name, tags: cr.tags, status: cr.status, expiresAt: cr.expiresAt });
+      res.json({ name: cr.name, description: cr.description, status: cr.status, expiresAt: cr.expiresAt });
     });
 
     // GET /api/secrets/create-request/:id/listen — SSE
@@ -2008,7 +2008,7 @@ export class WebServer {
         // Add the secret
         const newSecret = await this.vaultManager.addSecret({
           name: cr.name,
-          tags: cr.tags,
+          description: cr.description,
           content,
         });
 
@@ -2092,7 +2092,7 @@ export class WebServer {
         const newSecret = {
           id: crypto.randomUUID(),
           name: req.body.name,
-          tags: req.body.tags || [],
+          description: req.body.description || '',
           content: req.body.content || '',
           createdAt: Date.now(),
           updatedAt: Date.now(),
@@ -2121,7 +2121,7 @@ export class WebServer {
         const secret = vault.secrets.find(s => s.id === req.params.id);
         if (!secret) { res.status(404).json({ error: 'Secret not found' }); return; }
         if (req.body.name !== undefined) secret.name = req.body.name;
-        if (req.body.tags !== undefined) secret.tags = req.body.tags;
+        if (req.body.description !== undefined) secret.description = req.body.description;
         if (req.body.content !== undefined) secret.content = req.body.content;
         secret.updatedAt = Date.now();
         await storage.save(vault, session.vek);

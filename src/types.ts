@@ -11,7 +11,7 @@ export interface PasskeyCredential {
 export interface Secret {
   id: string;
   name: string;               // "yimin_test", "aws-prod-key"
-  tags: string[];             // ["ssh", "server"], ["api", "aws"]
+  description: string;
   content: string;            // Markdown content (encrypted at rest)
   createdAt: number;
   updatedAt: number;

@@ -862,7 +862,7 @@
       tbody.innerHTML = secrets.map(s => `
         <tr>
           <td><strong>${escapeHtml(s.name)}</strong></td>
-          <td>${(s.tags || []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</td>
+          <td>${escapeHtml(s.description || '')}</td>
           <td>${new Date(s.updatedAt).toLocaleString()}</td>
           <td>
             <button class="btn btn-sm" data-secret-id="${escapeHtml(s.id)}" onclick="editSecret(this.dataset.secretId)">Edit</button>
@@ -875,14 +875,14 @@
     async function showAddSecretModal() {
       const name = prompt('Secret name:');
       if (!name) return;
-      const tags = prompt('Tags (comma-separated):', '') || '';
+      const description = prompt('Description:', '') || '';
       const content = prompt('Content (markdown):', `# ${name}\n`) || '';
       
       try {
         const res = await fetch('/api/manage/secrets', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${manageToken}` },
-          body: JSON.stringify({ name, tags: tags.split(',').map(t => t.trim()).filter(Boolean), content }),
+          body: JSON.stringify({ name, description, content }),
         });
         const data = await res.json();
         if (data.success) {
@@ -908,15 +908,15 @@
 
         const name = prompt('Name:', secret.name);
         if (name === null) return;
-        const tags = prompt('Tags (comma-separated):', (secret.tags || []).join(', '));
-        if (tags === null) return;
+        const description = prompt('Description:', secret.description || '');
+        if (description === null) return;
         const content = prompt('Content (markdown):', data.content);
         if (content === null) return;
 
         const updateRes = await fetch(`/api/manage/secrets/${id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${manageToken}` },
-          body: JSON.stringify({ name, tags: tags.split(',').map(t => t.trim()).filter(Boolean), content }),
+          body: JSON.stringify({ name, description, content }),
         });
         const updateData = await updateRes.json();
         if (updateData.success) {
@@ -987,7 +987,7 @@
           <td>${escapeHtml(h.hostname)}</td>
           <td>${escapeHtml(String(h.port))}</td>
           <td>${escapeHtml(h.username)}</td>
-          <td>${(h.tags || []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</td>
+          <td>${escapeHtml(h.description || '')}</td>
           <td>
             <button class="btn btn-sm" data-host-id="${escapeHtml(h.id)}" onclick="editHost(this.dataset.hostId)">Edit</button>
             <button class="btn btn-danger btn-sm" data-host-id="${escapeHtml(h.id)}" onclick="deleteHost(this.dataset.hostId)">Delete</button>
@@ -1066,7 +1066,7 @@
         username: document.getElementById('hostUsername').value,
         authType: document.getElementById('hostAuthType').value,
         credential: document.getElementById('hostCredential').value,
-        tags: document.getElementById('hostTags').value.split(',').map(t => t.trim()).filter(Boolean)
+        description: document.getElementById('hostDescription').value
       };
 
       const res = await fetch('/api/manage/hosts', {
@@ -1116,7 +1116,7 @@
       document.getElementById('editHostPort').value = host.port;
       document.getElementById('editHostUsername').value = host.username;
       document.getElementById('editHostCredential').value = ''; // Don't load credential
-      document.getElementById('editHostTags').value = (host.tags || []).join(', ');
+      document.getElementById('editHostDescription').value = host.description || '';
       showModal('editHostModal');
     }
 
@@ -1129,7 +1129,7 @@
         hostname: document.getElementById('editHostHostname').value,
         port: parseInt(document.getElementById('editHostPort').value),
         username: document.getElementById('editHostUsername').value,
-        tags: document.getElementById('editHostTags').value.split(',').map(t => t.trim()).filter(Boolean)
+        description: document.getElementById('editHostDescription').value
       };
       
       // Only include credential if user entered a new one
