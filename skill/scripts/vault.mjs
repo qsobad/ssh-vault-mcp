@@ -1,19 +1,21 @@
 #!/usr/bin/env node
 /**
- * SSH Vault CLI — sign requests with agent Ed25519 key and interact with vault API.
+ * Secret Vault CLI — sign requests with agent Ed25519 key and interact with vault API.
  * Usage: node vault.mjs <command> [args...]
  * 
  * Commands:
- *   status                  - Check vault lock status
- *   unlock                  - Request vault unlock (prints URL for user)
- *   session                 - Show cached session info
- *   register                - Register agent with vault
- *   hosts                   - List available hosts
- *   exec <host> <cmd> [timeout] - Execute SSH command on host
+ *   status                       - Check vault lock status
+ *   session                      - Show cached session info
+ *   register                     - Register agent with vault
+ *   secrets                      - List secrets (name + description)
+ *   get-secret <name>            - Request secret content (triggers approval if needed)
+ *   create-secret <name> [desc]  - Request secret creation (user fills content)
+ *   exec <host> <cmd> [timeout]  - Execute SSH command on host
  */
 
 import _sodium from 'libsodium-wrappers';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
+import crypto from 'crypto';
 
 await _sodium.ready;
 const sodium = _sodium;
@@ -25,18 +27,14 @@ if (!VAULT_URL) {
 }
 const SESSION_FILE = '/tmp/ssh-vault-session.json';
 
-// Agent keys — read from environment variables
 const PRIVATE_KEY_B64 = process.env.SSH_VAULT_AGENT_PRIVATE_KEY;
 const PUBLIC_KEY_B64 = process.env.SSH_VAULT_AGENT_PUBLIC_KEY;
-// Derive fingerprint from public key
-import crypto from 'crypto';
-const FINGERPRINT = 'SHA256:' + crypto.createHash('sha256').update(Buffer.from(PUBLIC_KEY_B64, 'base64')).digest('base64').replace(/=+$/, '');
-
 if (!PRIVATE_KEY_B64 || !PUBLIC_KEY_B64) {
   console.error('Error: SSH_VAULT_AGENT_PRIVATE_KEY and SSH_VAULT_AGENT_PUBLIC_KEY env vars required');
   process.exit(1);
 }
 
+const FINGERPRINT = 'SHA256:' + crypto.createHash('sha256').update(Buffer.from(PUBLIC_KEY_B64, 'base64')).digest('base64').replace(/=+$/, '');
 const PRIVATE_KEY = Buffer.from(PRIVATE_KEY_B64, 'base64');
 
 function sign(payloadObj) {
@@ -72,45 +70,67 @@ async function api(method, path, body) {
   try { return JSON.parse(text); } catch { return { raw: text, status: res.status }; }
 }
 
+async function signedApi(method, path, payload = {}) {
+  const sig = sign(payload);
+  const session = loadSession();
+  if (method === 'GET') {
+    const params = new URLSearchParams({
+      publicKey: PUBLIC_KEY_B64,
+      signature: sig.signature,
+      timestamp: String(sig.timestamp),
+      nonce: sig.nonce,
+      fingerprint: FINGERPRINT,
+      payload: JSON.stringify(payload),
+    });
+    if (session) params.set('sessionId', session.sessionId);
+    return api('GET', `${path}?${params}`);
+  }
+  const body = { ...payload, ...sig, payload: JSON.stringify(payload) };
+  if (session) body.sessionId = session.sessionId;
+  return api('POST', path, body);
+}
+
+/** Listen on SSE until terminal event, return parsed data */
+function listenSSE(url, timeoutMs = 300000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('SSE timeout')), timeoutMs);
+    fetch(url).then(res => {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      function read() {
+        reader.read().then(({ done, value }) => {
+          if (done) { clearTimeout(timer); resolve(null); return; }
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split('\n');
+          buf = lines.pop();
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.status === 'completed' || data.status === 'approved' || data.status === 'rejected' || data.status === 'error') {
+                  clearTimeout(timer);
+                  // Save session if returned
+                  if (data.sessionId) saveSession({ sessionId: data.sessionId, expiresAt: data.expiresAt || Date.now() + 900000 });
+                  resolve(data);
+                  return;
+                }
+              } catch {}
+            }
+          }
+          read();
+        });
+      }
+      read();
+    }).catch(e => { clearTimeout(timer); reject(e); });
+  });
+}
+
 // Commands
 const cmd = process.argv[2];
 
 if (cmd === 'status') {
-  const r = await api('GET', '/api/vault/status');
-  console.log(JSON.stringify(r, null, 2));
-
-} else if (cmd === 'unlock') {
-  const r = await api('POST', '/api/vault/unlock', { agentFingerprint: FINGERPRINT });
-  if (r.challengeId) {
-    console.log(JSON.stringify({
-      status: 'pending',
-      unlockUrl: r.unlockUrl,
-      challengeId: r.challengeId,
-      expiresAt: new Date(r.expiresAt).toISOString(),
-    }, null, 2));
-  } else {
-    console.log(JSON.stringify(r, null, 2));
-  }
-
-} else if (cmd === 'check-unlock') {
-  const challengeId = process.argv[3];
-  if (!challengeId) { console.error('Usage: vault.mjs check-unlock <challengeId>'); process.exit(1); }
-  const r = await api('GET', `/api/challenge/${challengeId}/status`);
-  // If approved with unlockCode, submit it
-  if (r.status === 'approved' && r.unlockCode) {
-    const submit = await api('POST', '/api/vault/submit-unlock', {
-      unlockCode: r.unlockCode,
-      agentFingerprint: FINGERPRINT,
-    });
-    if (submit.success) {
-      saveSession({ sessionId: submit.sessionId, expiresAt: submit.expiresAt });
-      console.log(JSON.stringify({ status: 'unlocked', sessionId: submit.sessionId, expiresAt: new Date(submit.expiresAt).toISOString() }, null, 2));
-    } else {
-      console.log(JSON.stringify(submit, null, 2));
-    }
-  } else {
-    console.log(JSON.stringify(r, null, 2));
-  }
+  console.log(JSON.stringify(await api('GET', '/api/vault/status'), null, 2));
 
 } else if (cmd === 'session') {
   const s = loadSession();
@@ -128,13 +148,45 @@ if (cmd === 'status') {
   });
   console.log(JSON.stringify(r, null, 2));
 
-} else if (cmd === 'hosts') {
+} else if (cmd === 'secrets') {
+  // Server expects payload='list_secrets' for this endpoint
+  const payload = 'list_secrets';
+  const timestamp = Date.now();
+  const nonce = Buffer.from(sodium.randombytes_buf(16)).toString('hex');
+  const message = `${payload}:${timestamp}:${nonce}`;
+  const signature = Buffer.from(sodium.crypto_sign_detached(Buffer.from(message), PRIVATE_KEY)).toString('base64');
   const session = loadSession();
-  if (!session) { console.error('No active session. Run: vault.mjs unlock'); process.exit(1); }
-  const payload = {};
-  const sig = sign(payload);
-  const r = await api('GET', `/api/agent/hosts?sessionId=${session.sessionId}&publicKey=${encodeURIComponent(PUBLIC_KEY_B64)}&signature=${encodeURIComponent(sig.signature)}&timestamp=${sig.timestamp}&nonce=${sig.nonce}`);
+  const params = new URLSearchParams({ publicKey: PUBLIC_KEY_B64, signature, timestamp: String(timestamp), nonce });
+  if (session) params.set('sessionId', session.sessionId);
+  const r = await api('GET', `/api/secrets/list?${params}`);
   console.log(JSON.stringify(r, null, 2));
+
+} else if (cmd === 'get-secret') {
+  const name = process.argv[3];
+  if (!name) { console.error('Usage: vault.mjs get-secret <name>'); process.exit(1); }
+  const r = await signedApi('POST', '/api/secrets/request', { name });
+  if (r.needsApproval) {
+    console.error(`Approval needed: ${r.approvalUrl}`);
+    console.error('Waiting for approval...');
+    const result = await listenSSE(r.listenUrl);
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.log(JSON.stringify(r, null, 2));
+  }
+
+} else if (cmd === 'create-secret') {
+  const name = process.argv[3];
+  const description = process.argv[4] || '';
+  if (!name) { console.error('Usage: vault.mjs create-secret <name> [description]'); process.exit(1); }
+  const r = await signedApi('POST', '/api/secrets/create-request', { name, description });
+  if (r.approvalUrl) {
+    console.error(`User must fill content: ${r.approvalUrl}`);
+    console.error('Waiting...');
+    const result = await listenSSE(r.listenUrl);
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.log(JSON.stringify(r, null, 2));
+  }
 
 } else if (cmd === 'exec') {
   const host = process.argv[3];
@@ -142,23 +194,24 @@ if (cmd === 'status') {
   const timeout = process.argv[5] ? parseInt(process.argv[5]) : 30;
   if (!host || !command) { console.error('Usage: vault.mjs exec <host> <command> [timeout]'); process.exit(1); }
 
-  const session = loadSession();
   const payload = { host, command };
   const sig = sign(payload);
   const body = { ...payload, timeout, ...sig };
+  const session = loadSession();
   if (session) body.sessionId = session.sessionId;
 
   const r = await api('POST', '/api/vault/execute', body);
   
-  // Handle auto-approval response — listen on SSE for result
   if (r.needsApproval) {
-    console.log(JSON.stringify({
-      needsApproval: true,
-      approvalUrl: r.approvalUrl,
-      execRequestId: r.execRequestId,
-      listenUrl: r.listenUrl,
-      message: r.message,
-    }, null, 2));
+    console.error(`Approval needed: ${r.approvalUrl}`);
+    console.error('Waiting...');
+    const result = await listenSSE(r.listenUrl);
+    if (result?.stdout !== undefined) {
+      process.stdout.write(result.stdout);
+      if (result.stderr) process.stderr.write(result.stderr);
+    } else {
+      console.log(JSON.stringify(result, null, 2));
+    }
   } else if (r.output !== undefined) {
     process.stdout.write(r.output);
     if (r.exitCode !== undefined && r.exitCode !== 0) {
@@ -169,15 +222,15 @@ if (cmd === 'status') {
   }
 
 } else {
-  console.log(`SSH Vault CLI
+  console.log(`Secret Vault CLI
 Usage: node vault.mjs <command> [args...]
 
 Commands:
-  status                     Check vault lock status
-  unlock                     Request vault unlock
-  check-unlock <challengeId> Check unlock status & submit code
-  session                    Show cached session
-  register                   Register agent with vault
-  hosts                      List available hosts
-  exec <host> <cmd> [timeout] Execute command on host`);
+  status                       Check vault lock status
+  session                      Show cached session
+  register                     Register agent with vault
+  secrets                      List secrets (name + description)
+  get-secret <name>            Request secret content
+  create-secret <name> [desc]  Request secret creation
+  exec <host> <cmd> [timeout]  Execute SSH command on host`);
 }

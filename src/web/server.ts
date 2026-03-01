@@ -160,36 +160,6 @@ export class WebServer {
       });
     });
 
-    // Submit unlock code
-    this.app.post('/api/vault/submit-unlock', async (req: Request, res: Response) => {
-      if (!checkRateLimit(req.ip || 'unknown')) {
-        res.status(429).json({ error: 'Too many attempts. Try again later.' });
-        return;
-      }
-      const { unlockCode, agentFingerprint } = req.body;
-      
-      if (!unlockCode) {
-        res.status(400).json({ error: 'unlockCode required' });
-        return;
-      }
-
-      const result = await this.vaultManager.submitUnlockCode(
-        unlockCode,
-        agentFingerprint || 'SHA256:unknown-agent'
-      );
-
-      if (result.success) {
-        res.json({
-          success: true,
-          sessionId: result.sessionId,
-          expiresAt: result.expiresAt,
-          message: 'Vault unlocked successfully',
-        });
-      } else {
-        res.status(400).json({ error: result.error });
-      }
-    });
-
     // Check vault status
     this.app.get('/api/vault/status', async (_req: Request, res: Response) => {
       const exists = await this.vaultManager.vaultExists();
@@ -2734,10 +2704,6 @@ export class WebServer {
       res.sendFile(path.join(__dirname, '../../web/manage.html'));
     });
 
-    // Serve signing page
-    this.app.get('/sign', (_req: Request, res: Response) => {
-      res.sendFile(path.join(__dirname, '../../web/auth.html'));
-    });
 
     this.app.get('/approve', (_req: Request, res: Response) => {
       res.sendFile(path.join(__dirname, '../../web/auth.html'));

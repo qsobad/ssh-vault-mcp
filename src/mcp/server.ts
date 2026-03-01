@@ -20,9 +20,7 @@ import path from 'path';
 import { SnippetManager } from '../snippet/index.js';
 
 // Tool input schemas
-const SubmitUnlockSchema = z.object({
-  unlock_code: z.string().describe('Unlock code from the signing page'),
-});
+
 
 const ExecuteCommandSchema = z.object({
   host: z.string().describe('Secret name containing SSH info'),
@@ -63,32 +61,6 @@ const TOOLS: Tool[] = [
         ...SIGNATURE_PROPERTIES,
       },
       required: SIGNATURE_REQUIRED,
-    },
-  },
-  {
-    name: 'request_unlock',
-    description: 'Request to unlock the vault. Returns a URL for Passkey authentication. Requires signed request.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        ...SIGNATURE_PROPERTIES,
-      },
-      required: SIGNATURE_REQUIRED,
-    },
-  },
-  {
-    name: 'submit_unlock',
-    description: 'Submit the unlock code obtained from the signing page. Requires signed request.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        unlock_code: {
-          type: 'string',
-          description: 'The unlock code shown on the signing page after Passkey verification',
-        },
-        ...SIGNATURE_PROPERTIES,
-      },
-      required: ['unlock_code', ...SIGNATURE_REQUIRED],
     },
   },
   {
@@ -367,13 +339,6 @@ export class MCPServer {
           case 'vault_status':
             return this.handleVaultStatus(fingerprint);
 
-          case 'request_unlock':
-            return this.handleRequestUnlock(fingerprint);
-
-          case 'submit_unlock':
-            const unlockArgs = SubmitUnlockSchema.parse(typedArgs);
-            return this.handleSubmitUnlock(unlockArgs.unlock_code, fingerprint);
-
           case 'execute_command':
             const execArgs = ExecuteCommandSchema.parse(typedArgs);
             return this.handleExecuteCommand(
@@ -516,58 +481,7 @@ export class MCPServer {
     };
   }
 
-  private async handleRequestUnlock(fingerprint: string) {
-    if (this.vaultManager.isUnlocked()) {
-      const session = this.vaultManager.getSessionByAgent(fingerprint);
-      if (session) {
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              status: 'already_unlocked',
-              sessionId: session.id,
-              expiresAt: session.expiresAt,
-            }, null, 2),
-          }],
-        };
-      }
-    }
-
-    const { challengeId, unlockUrl, listenUrl, expiresAt } = this.vaultManager.createUnlockChallenge(
-      this.config.web.externalUrl,
-      fingerprint
-    );
-
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify({
-          status: 'pending',
-          unlockUrl,
-          listenUrl,
-          challengeId,
-          expiresAt,
-          message: 'Please visit the URL and authenticate with your Passkey. You will be notified automatically when approved, or you can provide the unlock code manually.',
-        }, null, 2),
-      }],
-    };
-  }
-
-  private async handleSubmitUnlock(unlockCode: string, fingerprint: string) {
-    const result = await this.vaultManager.submitUnlockCode(
-      unlockCode,
-      fingerprint
-    );
-
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify(result, null, 2),
-      }],
-    };
-  }
-
-  private async handleExecuteCommand(
+    private async handleExecuteCommand(
     hostName: string,
     command: string,
     timeout: number,
@@ -578,7 +492,7 @@ export class MCPServer {
         content: [{
           type: 'text',
           text: JSON.stringify({
-            error: 'Vault is locked. Use request_unlock first.',
+            error: 'Vault is locked. Request will trigger approval.',
           }, null, 2),
         }],
         isError: true,
@@ -615,7 +529,7 @@ export class MCPServer {
         content: [{
           type: 'text',
           text: JSON.stringify({
-            error: 'No active session. Use request_unlock to create one.',
+            error: 'No active session. Request will trigger approval.',
           }, null, 2),
         }],
         isError: true,
@@ -749,7 +663,7 @@ export class MCPServer {
     const name = args.name as string;
 
     if (!this.vaultManager.isUnlocked()) {
-      return { content: [{ type: 'text', text: JSON.stringify({ error: 'Vault is locked. Use request_unlock first.' }) }], isError: true };
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'Vault is locked. Request will trigger approval.' }) }], isError: true };
     }
 
     const secret = this.vaultManager.getSecret(name);
@@ -769,7 +683,7 @@ export class MCPServer {
     return {
       content: [{ type: 'text', text: JSON.stringify({
         needsApproval: true,
-        message: `Secret access requires approval. Use request_unlock first, or access via: ${baseUrl}`,
+        message: `Secret access requires approval. Access via: ${baseUrl}`,
       }, null, 2) }],
     };
   }

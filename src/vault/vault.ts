@@ -331,13 +331,8 @@ export class VaultManager {
     // Store signature (VEK)
     pending.signature = new Uint8Array(signature);
     
-    // For access requests, always complete immediately (user just approved)
-    // For other challenges, only auto-complete if there are listeners
-    const shouldAutoComplete = 
-      pending.challenge.action === 'request_access' ||
-      (autoUnlock && this.hasListeners(challengeId));
-    
-    if (shouldAutoComplete) {
+    // Auto-complete: always unlock when autoUnlock is true
+    if (autoUnlock) {
       const result = await this.submitUnlockCode(
         pending.unlockCode,
         pending.agentFingerprint
