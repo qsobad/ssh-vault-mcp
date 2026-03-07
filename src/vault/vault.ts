@@ -33,11 +33,11 @@ export class VaultManager {
   private sessionTimeoutMs: number;
   private challengeTimeoutMs: number = 5 * 60 * 1000; // 5 minutes
   private currentSignature: Uint8Array | null = null;
-  
+
   // Auto-lock timer
   private autoLockTimer: ReturnType<typeof setTimeout> | null = null;
   private autoLockMs: number;
-  
+
   // SSE event listeners per challenge
   private challengeListeners: Map<string, Set<ChallengeEventListener>> = new Map();
 
@@ -181,7 +181,7 @@ export class VaultManager {
     };
 
     const unlockCode = generateUnlockCode();
-    
+
     this.pendingChallenges.set(challenge.id, {
       challenge,
       unlockCode,
@@ -225,7 +225,7 @@ export class VaultManager {
     };
 
     const unlockCode = generateUnlockCode();
-    
+
     this.pendingChallenges.set(challenge.id, {
       challenge,
       unlockCode,
@@ -268,7 +268,7 @@ export class VaultManager {
     };
 
     const unlockCode = generateUnlockCode();
-    
+
     this.pendingChallenges.set(challenge.id, {
       challenge,
       unlockCode,
@@ -318,7 +318,7 @@ export class VaultManager {
     challengeId: string,
     signature: Uint8Array,
     autoUnlock: boolean = true
-  ): Promise<{ 
+  ): Promise<{
     unlockCode: string;
     autoUnlocked?: boolean;
     sessionId?: string;
@@ -330,14 +330,14 @@ export class VaultManager {
 
     // Store signature (VEK)
     pending.signature = new Uint8Array(signature);
-    
+
     // Auto-complete: always unlock when autoUnlock is true
     if (autoUnlock) {
       const result = await this.submitUnlockCode(
         pending.unlockCode,
         pending.agentFingerprint
       );
-      
+
       if (result.success) {
         return {
           unlockCode: pending.unlockCode,
@@ -346,7 +346,7 @@ export class VaultManager {
         };
       }
     }
-    
+
     return { unlockCode: pending.unlockCode };
   }
 
@@ -365,7 +365,7 @@ export class VaultManager {
     // Find challenge by unlock code
     let foundChallenge: PendingChallenge | null = null;
     let foundId: string | null = null;
-    
+
     for (const [id, pending] of this.pendingChallenges.entries()) {
       if (pending.unlockCode === unlockCode && pending.signature) {
         foundChallenge = pending;
@@ -390,22 +390,22 @@ export class VaultManager {
         this.vault = this.stripCredentials(fullVault);
         this.currentSignature = new Uint8Array(foundChallenge.signature);
         this.resetAutoLockTimer();
-        
+
         // Create session
         const session = this.createSession(agentFingerprint);
-        
+
         // Emit event to listeners
         this.emitChallengeEvent(foundId, {
           type: 'approved',
           challengeId: foundId,
           sessionId: session.id,
         });
-        
+
         // Save result for polling and cleanup
         this.saveChallengeResult(foundId, { status: 'approved', sessionId: session.id });
         this.pendingChallenges.delete(foundId);
         this.challengeListeners.delete(foundId);
-        
+
         return {
           success: true,
           sessionId: session.id,
@@ -420,23 +420,23 @@ export class VaultManager {
 
         const host = foundChallenge.challenge.host!;
         const commands = foundChallenge.challenge.commands!;
-        
+
         if (!session.approvedCommands[host]) {
           session.approvedCommands[host] = [];
         }
         session.approvedCommands[host].push(...commands);
-        
+
         // Emit event to listeners
         this.emitChallengeEvent(foundId, {
           type: 'approved',
           challengeId: foundId,
           sessionId: session.id,
         });
-        
+
         // Cleanup
         this.pendingChallenges.delete(foundId);
         this.challengeListeners.delete(foundId);
-        
+
         return {
           success: true,
           sessionId: session.id,
@@ -445,7 +445,7 @@ export class VaultManager {
       } else if (foundChallenge.challenge.action === 'request_access') {
         // Agent requesting host access (auto-enlist if not exists)
         const req = foundChallenge.challenge.accessRequest!;
-        
+
         // Load vault with signature to modify it
         if (!this.currentSignature) {
           this.currentSignature = new Uint8Array(foundChallenge.signature);
@@ -453,7 +453,7 @@ export class VaultManager {
         }
         // Load full vault for modification (will strip after save)
         const fullVaultForAccess = await this.storage.load(this.currentSignature);
-        
+
         // Find or create agent
         let agent = fullVaultForAccess.agents.find(a => a.fingerprint === req.fingerprint);
         if (!agent) {
@@ -467,7 +467,7 @@ export class VaultManager {
           };
           fullVaultForAccess.agents.push(agent);
         }
-        
+
         // Add requested hosts (merge with existing, avoid duplicates)
         for (const host of req.requestedHosts) {
           if (!agent.allowedHosts.includes(host)) {
@@ -475,27 +475,27 @@ export class VaultManager {
           }
         }
         agent.lastUsed = Date.now();
-        
+
         // Save vault and update in-memory (stripped)
         await this.storage.save(fullVaultForAccess, this.currentSignature!);
         this.vault = this.stripCredentials(fullVaultForAccess);
-        
+
         // Create session for the agent with approved hosts
         const session = this.createSession(req.fingerprint);
         session.approvedHosts = [...agent.allowedHosts];
-        
+
         // Emit event to listeners
         this.emitChallengeEvent(foundId, {
           type: 'approved',
           challengeId: foundId,
           sessionId: session.id,
         });
-        
+
         // Save result for polling and cleanup
         this.saveChallengeResult(foundId, { status: 'approved', sessionId: session.id });
         this.pendingChallenges.delete(foundId);
         this.challengeListeners.delete(foundId);
-        
+
         return {
           success: true,
           sessionId: session.id,
@@ -525,7 +525,7 @@ export class VaultManager {
       createdAt: Date.now(),
       expiresAt: Date.now() + this.sessionTimeoutMs,
     };
-    
+
     this.sessions.set(session.id, session);
     return session;
   }
@@ -658,6 +658,27 @@ export class VaultManager {
     }
 
     fullVault.agents.splice(index, 1);
+    await this.storage.save(fullVault, this.currentSignature);
+    this.vault = this.stripCredentials(fullVault);
+    return true;
+  }
+
+  /**
+   * Set the alwaysApprove flag for an agent
+   */
+  async setAgentAlwaysApprove(fingerprint: string, alwaysApprove: boolean): Promise<boolean> {
+    if (!this.currentSignature) {
+      throw new Error('Vault is locked');
+    }
+    this.resetAutoLockTimer();
+
+    const fullVault = await this.storage.load(this.currentSignature);
+    const agent = fullVault.agents.find(a => a.fingerprint === fingerprint);
+    if (!agent) {
+      return false;
+    }
+
+    agent.alwaysApprove = alwaysApprove;
     await this.storage.save(fullVault, this.currentSignature);
     this.vault = this.stripCredentials(fullVault);
     return true;

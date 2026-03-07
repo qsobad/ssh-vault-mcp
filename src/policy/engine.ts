@@ -51,6 +51,14 @@ export class PolicyEngine {
       return hostCheck;
     }
 
+    // Bypass further checks if the agent is marked as "Always Approve"
+    if (agent.alwaysApprove) {
+      return {
+        allowed: true,
+        reason: 'Agent is marked as Always Approve',
+      };
+    }
+
     // Extract the base command (first word)
     const baseCommand = this.extractBaseCommand(command);
 
@@ -111,7 +119,7 @@ export class PolicyEngine {
   private extractBaseCommand(command: string): string {
     const trimmed = command.trim();
     const parts = trimmed.split(/\s+/);
-    
+
     // Skip common wrappers
     let index = 0;
     while (index < parts.length) {

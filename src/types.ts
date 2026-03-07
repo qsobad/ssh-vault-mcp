@@ -21,6 +21,7 @@ export interface AgentConfig {
   fingerprint: string;        // "SHA256:abc123..."
   name: string;               // "coding-agent"
   allowedHosts: string[];     // ["dev-*", "staging-*"] - legacy, also used for secret access
+  alwaysApprove?: boolean;    // Provide automatic approval for command execution
   createdAt: number;
   lastUsed: number;
 }

@@ -105,6 +105,10 @@
         <div class="form-group">
           <label>Master Password</label>
           <input type="password" id="passwordInput" placeholder="Enter master password" autofocus>
+          <div style="margin-top: 12px; display: flex; align-items: center; gap: 8px;">
+            <input type="checkbox" id="alwaysApproveCheckbox" style="width: 16px; height: 16px; margin: 0;">
+            <label for="alwaysApproveCheckbox" style="margin: 0; font-size: 13px;">Always approve future commands from this agent</label>
+          </div>
         </div>
         <button class="btn btn-primary" id="authBtn" onclick="authenticate()">
           🔐 Authenticate & Execute
@@ -228,7 +232,8 @@
                 signature: bufferToBase64(credential.response.signature),
                 userHandle: credential.response.userHandle ? bufferToBase64(credential.response.userHandle) : null
               }
-            }
+            },
+            alwaysApprove: document.getElementById('alwaysApproveCheckbox').checked
           })
         });
         const approveData = await approveRes.json();

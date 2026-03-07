@@ -120,7 +120,7 @@ export class WebServer {
       credentials: true,
     }));
     this.app.use(express.json({ limit: '50mb' }));
-    
+
     // Serve static files from web directory
     const webDir = path.join(__dirname, '../../web');
     this.app.use(express.static(webDir));
@@ -144,7 +144,7 @@ export class WebServer {
     // Create vault unlock challenge (for testing / agent use)
     this.app.post('/api/vault/unlock', (req: Request, res: Response) => {
       const agentFingerprint = req.body.agentFingerprint || 'SHA256:unknown-agent';
-      
+
       const { challengeId, unlockUrl, listenUrl, expiresAt } = this.vaultManager.createUnlockChallenge(
         this.config.web.externalUrl,
         agentFingerprint
@@ -400,7 +400,7 @@ export class WebServer {
         }
       } catch (error) {
         console.error('[execute] Error:', error);
-        res.status(500).json({ 
+        res.status(500).json({
           error: 'Command execution failed: ' + (error instanceof Error ? error.message : String(error))
         });
       }
@@ -686,8 +686,8 @@ export class WebServer {
 
         res.json({ options, challengeId });
       } catch (error) {
-        res.status(500).json({ 
-          error: error instanceof Error ? error.message : 'Registration failed' 
+        res.status(500).json({
+          error: error instanceof Error ? error.message : 'Registration failed'
         });
       }
     });
@@ -709,7 +709,7 @@ export class WebServer {
         }
 
         const result = await this.webauthn.verifyRegistration(challengeId, response);
-        
+
         if (!result.success || !result.credential) {
           res.status(400).json({ error: result.error || 'Verification failed' });
           return;
@@ -738,15 +738,15 @@ export class WebServer {
           vek,
         });
 
-        res.json({ 
-          success: true, 
+        res.json({
+          success: true,
           message: 'Registration successful. Vault created.',
           credentialId: result.credential.id,
           token,  // Return session token
         });
       } catch (error) {
-        res.status(500).json({ 
-          error: error instanceof Error ? error.message : 'Verification failed' 
+        res.status(500).json({
+          error: error instanceof Error ? error.message : 'Verification failed'
         });
       }
     });
@@ -755,7 +755,7 @@ export class WebServer {
     this.app.post('/api/agent/request-access', async (req: Request, res: Response) => {
       try {
         const { name, publicKey, requestedHosts } = req.body;
-        
+
         if (!name || !publicKey) {
           res.status(400).json({ error: 'name and publicKey required' });
           return;
@@ -768,7 +768,7 @@ export class WebServer {
 
         // Import fingerprint function
         const { fingerprintFromPublicKey } = await import('../auth/agent.js');
-        
+
         let fingerprint: string;
         try {
           fingerprint = fingerprintFromPublicKey(publicKey);
@@ -797,8 +797,8 @@ export class WebServer {
           expiresAt: result.expiresAt,
         });
       } catch (error) {
-        res.status(500).json({ 
-          error: error instanceof Error ? error.message : 'Request failed' 
+        res.status(500).json({
+          error: error instanceof Error ? error.message : 'Request failed'
         });
       }
     });
@@ -819,8 +819,8 @@ export class WebServer {
 
         res.json({ options, challengeId });
       } catch (error) {
-        res.status(500).json({ 
-          error: error instanceof Error ? error.message : 'Failed to generate options' 
+        res.status(500).json({
+          error: error instanceof Error ? error.message : 'Failed to generate options'
         });
       }
     });
@@ -833,10 +833,10 @@ export class WebServer {
       try {
         const { webauthnChallengeId, vaultChallengeId, response, allowedHosts, password } = req.body;
         console.log('[auth/verify] Request received, hasPassword:', !!password, 'vaultChallengeId:', vaultChallengeId);
-        
+
         if (!webauthnChallengeId || !vaultChallengeId || !response) {
-          res.status(400).json({ 
-            error: 'webauthnChallengeId, vaultChallengeId, and response required' 
+          res.status(400).json({
+            error: 'webauthnChallengeId, vaultChallengeId, and response required'
           });
           return;
         }
@@ -920,8 +920,8 @@ export class WebServer {
           });
         }
       } catch (error) {
-        res.status(500).json({ 
-          error: error instanceof Error ? error.message : 'Verification failed' 
+        res.status(500).json({
+          error: error instanceof Error ? error.message : 'Verification failed'
         });
       }
     });
@@ -930,7 +930,7 @@ export class WebServer {
     this.app.get('/api/challenge/:id/listen', (req: Request, res: Response) => {
       const challengeId = req.params.id;
       const agentFingerprint = req.query.fingerprint as string;
-      
+
       // Check if challenge exists
       const challenge = this.vaultManager.getChallenge(challengeId);
       if (!challenge) {
@@ -943,7 +943,7 @@ export class WebServer {
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
       res.setHeader('X-Accel-Buffering', 'no'); // For nginx
-      
+
       // Send initial connection event
       res.write(`data: ${JSON.stringify({ type: 'connected', challengeId })}\n\n`);
 
@@ -955,7 +955,7 @@ export class WebServer {
           delete safeEvent.sessionId;
         }
         res.write(`data: ${JSON.stringify(safeEvent)}\n\n`);
-        
+
         // Close connection after approval
         if (event.type === 'approved' || event.type === 'error') {
           res.end();
@@ -1384,9 +1384,9 @@ export class WebServer {
       }
 
       const listener = (event: any) => {
-        try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch {}
+        try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { }
         if (event.status === 'completed' || event.status === 'failed' || event.status === 'rejected') {
-          try { res.end(); } catch {}
+          try { res.end(); } catch { }
         }
       };
       er.listeners.add(listener);
@@ -1400,7 +1400,7 @@ export class WebServer {
           try {
             res.write(`data: ${JSON.stringify({ status: 'expired' })}\n\n`);
             res.end();
-          } catch {}
+          } catch { }
           er.listeners.delete(listener);
         }, timeoutMs);
       }
@@ -1423,7 +1423,7 @@ export class WebServer {
         return;
       }
 
-      const { password, webauthnChallengeId, webauthnResponse } = req.body;
+      const { password, webauthnChallengeId, webauthnResponse, alwaysApprove } = req.body;
       if (!password || !webauthnChallengeId || !webauthnResponse) {
         res.status(400).json({ error: 'password, webauthnChallengeId, and webauthnResponse required' });
         return;
@@ -1465,7 +1465,7 @@ export class WebServer {
         // Step 4: Unlock vault if needed & create session
         const emitStatus = (event: any) => {
           for (const listener of er.listeners) {
-            try { listener(event); } catch {}
+            try { listener(event); } catch { }
           }
         };
 
@@ -1518,6 +1518,11 @@ export class WebServer {
         }
 
         er.sessionId = session.id;
+
+        // Apply alwaysApprove if requested
+        if (alwaysApprove) {
+          await this.vaultManager.setAgentAlwaysApprove(er.agentFingerprint, true);
+        }
 
         // Step 5: Execute the command
         er.status = 'executing';
@@ -1597,7 +1602,7 @@ export class WebServer {
         er.status = 'failed';
         er.error = error instanceof Error ? error.message : 'Approval failed';
         for (const listener of er.listeners) {
-          try { listener({ status: 'failed', error: er.error }); } catch {}
+          try { listener({ status: 'failed', error: er.error }); } catch { }
         }
         res.status(500).json({ error: er.error });
       }
@@ -1609,7 +1614,7 @@ export class WebServer {
       if (!er) { res.status(404).json({ error: 'Not found' }); return; }
       er.status = 'rejected';
       for (const listener of er.listeners) {
-        try { listener({ status: 'rejected' }); } catch {}
+        try { listener({ status: 'rejected' }); } catch { }
       }
       res.json({ success: true });
     });
@@ -1781,7 +1786,7 @@ export class WebServer {
 
         // Unlock vault if needed, get/create session
         const content = await this.vaultManager.decryptSecretContent(sr.name);
-        
+
         // Create session for the agent
         // Use internal unlock if not already unlocked
         let session = this.vaultManager.getSessionByAgent(sr.agentFingerprint);
@@ -1799,7 +1804,7 @@ export class WebServer {
 
         // Notify listeners with content + sessionId
         for (const listener of sr.listeners) {
-          try { listener({ status: 'approved', content, sessionId: session?.id }); } catch {}
+          try { listener({ status: 'approved', content, sessionId: session?.id }); } catch { }
         }
 
         secureWipe(vek);
@@ -1815,7 +1820,7 @@ export class WebServer {
       if (!sr) { res.status(404).json({ error: 'Not found' }); return; }
       sr.status = 'rejected';
       for (const listener of sr.listeners) {
-        try { listener({ status: 'rejected' }); } catch {}
+        try { listener({ status: 'rejected' }); } catch { }
       }
       res.json({ success: true });
     });
@@ -1984,7 +1989,7 @@ export class WebServer {
 
         cr.status = 'approved';
         for (const listener of cr.listeners) {
-          try { listener({ status: 'approved', secretId: newSecret.id }); } catch {}
+          try { listener({ status: 'approved', secretId: newSecret.id }); } catch { }
         }
 
         secureWipe(vek);
@@ -2000,7 +2005,7 @@ export class WebServer {
       if (!cr) { res.status(404).json({ error: 'Not found' }); return; }
       cr.status = 'rejected';
       for (const listener of cr.listeners) {
-        try { listener({ status: 'rejected' }); } catch {}
+        try { listener({ status: 'rejected' }); } catch { }
       }
       res.json({ success: true });
     });
@@ -2165,7 +2170,7 @@ export class WebServer {
       }
       try {
         const { challengeId, response, password } = req.body;
-        
+
         if (!password) {
           res.status(400).json({ error: 'Master password required' });
           return;
@@ -2239,7 +2244,7 @@ export class WebServer {
     this.app.get('/api/manage/data', async (req: Request, res: Response) => {
       const token = req.headers.authorization?.replace('Bearer ', '');
       const session = token ? manageSessions.get(token) : null;
-      
+
       if (!session || session.expiresAt < Date.now()) {
         res.status(401).json({ error: 'Unauthorized' });
         return;
@@ -2271,7 +2276,7 @@ export class WebServer {
     this.app.put('/api/manage/policy', async (req: Request, res: Response) => {
       const token = req.headers.authorization?.replace('Bearer ', '');
       const session = token ? manageSessions.get(token) : null;
-      
+
       if (!session || session.expiresAt < Date.now()) {
         res.status(401).json({ error: 'Unauthorized' });
         return;
@@ -2300,7 +2305,7 @@ export class WebServer {
     this.app.post('/api/manage/agents', async (req: Request, res: Response) => {
       const token = req.headers.authorization?.replace('Bearer ', '');
       const session = token ? manageSessions.get(token) : null;
-      
+
       if (!session || session.expiresAt < Date.now()) {
         res.status(401).json({ error: 'Unauthorized' });
         return;
@@ -2334,7 +2339,7 @@ export class WebServer {
     this.app.put('/api/manage/agents/:fingerprint', async (req: Request, res: Response) => {
       const token = req.headers.authorization?.replace('Bearer ', '');
       const session = token ? manageSessions.get(token) : null;
-      
+
       if (!session || session.expiresAt < Date.now()) {
         res.status(401).json({ error: 'Unauthorized' });
         return;
@@ -2369,7 +2374,7 @@ export class WebServer {
     this.app.delete('/api/manage/agents/:fingerprint', async (req: Request, res: Response) => {
       const token = req.headers.authorization?.replace('Bearer ', '');
       const session = token ? manageSessions.get(token) : null;
-      
+
       if (!session || session.expiresAt < Date.now()) {
         res.status(401).json({ error: 'Unauthorized' });
         return;
